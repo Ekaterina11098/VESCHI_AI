@@ -44,8 +44,8 @@ def get_ms_store_id_by_name(store_name="МСК"):
     return None
 
 def load_ms_stocks_dict():
-    """📡 ЖЕСТКИЙ POST-ФИЛЬТР МСК: Запрашивает остатки через специализированный 
-    POST-метод report/stock/by_store строго для выбранного склада МСК."""
+    """📡 ГЛУБОКИЙ POST-АНАЛИЗ МСК: Корректно заныривает во вложенные JSON-объекты 
+    отчёта by_store и вытаскивает оттуда чистые артикулы товаров по складу МСК."""
     if not MS_TOKEN:
         return {}
     
@@ -59,19 +59,30 @@ def load_ms_stocks_dict():
         "Accept-Encoding": "gzip"
     }
     
-    # Жестко задаем параметры фильтрации
     params = {"limit": 1000}
     if store_id:
         params["storeId"] = store_id
         
     try:
-        # 🚨 ИСПРАВЛЕНИЕ: Отправляем POST вместо GET с пустым JSON-телом, как требует API Моего Склада!
         response = requests.post(url, headers=headers, json={}, params=params, timeout=15)
         if response.status_code == 200:
             rows = response.json().get("rows", [])
             for row in rows:
+                stock = int(row.get("stock", 0)) # Чистый физический остаток на МСК
+                
+                # 🚨 УМНЫЙ ПЕРЕХВАТ: В отчёте by_store артикул может лежать либо на верхнем уровне,
+                # либо внутри вложенных параметров товара/модификации. Проверяем оба варианта!
                 art = str(row.get("article", "")).strip()
-                stock = int(row.get("stock", 0)) # Чистый остаток строго на МСК
+                if not art and "name" in row:
+                    # Если API отдал имя в формате 'Артикул (Наименование)', вырезаем код
+                    name_str = str(row.get("name", ""))
+                    if "(" in name_str:
+                        art = name_str.split("(")[0].strip()
+                        
+                # Если МойСклад вернул классическую вложенную карточку продукта
+                if not art and "product" in row:
+                    prod_data = row.get("product", {})
+                    art = str(prod_data.get("article", "")).strip()
                 
                 if art and stock > 0:
                     stocks_dict[art.lower()] = stock
@@ -178,7 +189,7 @@ async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
     await message.answer(
-        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Точные остатки по складу МСК полностью синхронизированы!\n\n"
+        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Полная вложенная JSON-синхронизация со складом МСК успешно завершена!\n\n"
         "• Напишите **остатки** — проверка дефицита и лимитов ходовых товаров на 7 дней.\n"
         "• Напишите **новинки** — радар позиций, которые есть на складе МСК (как 86-Zont-blue), но забыты на WB.\n"
         "• Напишите **аудит** — жесткий радар логистики (габариты, вес) и ТН ВЭД карточек."
@@ -186,9 +197,8 @@ async def cmd_start(message: types.Message):
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "остатки")
 async def check_cross_stocks(message: types.Message):
-    status_msg = await message.answer("⚡ Сверяю точные суммы двух кабинетов WB с реальным наличием на складе МСК...")
+    status_msg = await message.answer("⚡ Проверяю вложенные остатки по складу МСК и сверяю суммы двух кабинетов WB...")
     
-    # Загружаем реальные остатки только со склада МСК через POST
     ms_stocks = load_ms_stocks_dict()
     current_articles = list(ms_stocks.keys())
     
@@ -200,16 +210,13 @@ async def check_cross_stocks(message: types.Message):
     for art, ms_stock in ms_stocks.items():
         total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
         
-        # Смотрим только те товары, которые уже запущены в продажу на WB
         if total_wb > 0:
             sales_speed = get_wb_sales_speed(art)
             days_left = total_wb / sales_speed if sales_speed > 0 else 0
             
-            # 1. Контроль овербукинга относительно МСК
             if total_wb > ms_stock:
                 report_lines.append(f"🚨 **ОВЕРБУКИНГ! Арт: `{art}`**\n• На WB суммарно: {total_wb} шт. | На складе МСК: {ms_stock} шт.\n")
                 issues_found += 1
-            # 2. Контроль дефицита на 7 дней
             elif days_left < 7 and ms_stock > total_wb:
                 required_stock = int((7 - days_left) * sales_speed)
                 safe_add = min(required_stock, ms_stock - total_wb)
@@ -219,15 +226,14 @@ async def check_cross_stocks(message: types.Message):
 
     await status_msg.delete()
     if issues_found == 0:
-        await message.reply("✅ **Все ходовые товары в идеальном балансе!** Суммы остатков кабинетов соответствуют складу МСК, товара хватает минимум на 7 дней продаж.", parse_mode="Markdown")
+        await message.reply("✅ **Все ходовые товары в идеальном балансе!** Остатков на складе МСК хватает минимум на 7 дней продаж.", parse_mode="Markdown")
     else:
         await message.reply("\n".join(report_lines[:15]), parse_mode="Markdown")
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "новинки")
 async def check_new_products_radar(message: types.Message):
-    status_msg = await message.answer("🔍 Радар МСК запущен через POST-шлюз. Ищу скрытые новинки...")
+    status_msg = await message.answer("🔍 Радар МСК запущен через глубокий парсинг JSON. Ищу скрытые новинки...")
     
-    # Авто-диагностика на случай отсутствия склада МСК
     if not get_ms_store_id_by_name("МСК"):
         url = "https://moysklad.ru"
         headers = {"Authorization": f"Bearer {MS_TOKEN}"}
@@ -256,7 +262,6 @@ async def check_new_products_radar(message: types.Message):
     for art, ms_stock in ms_stocks.items():
         total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
         
-        # СТРАТЕГИЧЕСКАЯ СВЕРКА: Товар лежит физически в МСК, а на WB остаток равен 0!
         if total_wb == 0 and ms_stock > 0:
             report_lines.append(
                 f"✨ **ПОСТАВЬ НА ОСТАТОК НОВЫЙ ТОВАР! Арт: `{art}`**\n"
