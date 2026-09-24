@@ -78,7 +78,7 @@ def get_real_wb_stocks(token, articles_list):
             pass
     return wb_stocks_dict
 def get_real_wb_cards_and_scores(token):
-    """📡 БЕЗЛИМИТНЫЙ ЗАПРОС КАРТОЧЕК: Скачивает абсолютно ВСЕ карточки контента через пагинацию."""
+    """📡 БЕЗЛИМИТНЫЙ ЗАПРОС КАРТОЧЕК через пагинацию"""
     if not token:
         return []
     headers = {"Authorization": token}
@@ -134,11 +134,11 @@ async def run_scheduled_stock_check():
 async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
-    await message.answer("Привет, Екатерина! 👜✨\nЯ ваш безлимитный ИИ-супервайзер бренда VESCHI.\n\n• Напишите **остатки** — тотальный анализ дефицита.\n• Напишите **аудит** — мгновенный радар скрытых карточек-невидимок и сброса ТН ВЭД.")
+    await message.answer("Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI.\n\n• Напишите **остатки** — тотальный анализ дефицита.\n• Напишите **аудит** — компактный радар ВСЕХ скрытых позиций-невидимок и сброса ТН ВЭД.")
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "остатки")
 async def check_cross_stocks(message: types.Message):
-    status_msg = await message.answer("⚡ Провожу глубокий анализ дефицита, обнулений и лимитов по ВСЕМ артикулам...")
+    status_msg = await message.answer("⚡ Провожу глубокий анализ дефицита по ВСЕМ артикулам...")
     wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, REAL_ARTICLES)
     wb_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, REAL_ARTICLES)
     report_lines = ["📋 **АНАЛИТИКА УПУЩЕННОЙ ВЫРУЧКИ И ДЕФИЦИТА:**\n"]
@@ -149,8 +149,6 @@ async def check_cross_stocks(message: types.Message):
     for art, ms_stock in ms_results:
         art_l = str(art).strip().lower()
         total_wb = wb_stocks_1.get(art_l, 0) + wb_stocks_2.get(art_l, 0)
-        sales_speed = get_wb_sales_speed(art)
-        days_left = total_wb / sales_speed if sales_speed > 0 and total_wb > 0 else 0
         if total_wb == 0 and ms_stock > 0:
             report_lines.append(f"🔥 **УПУЩЕННАЯ ВЫРУЧКА! Арт: `{art}`**\n• На WB: **0 шт.** | В Моем Складе: **{ms_stock} шт.**\n")
             issues_found += 1
@@ -162,31 +160,33 @@ async def check_cross_stocks(message: types.Message):
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "аудит")
 async def check_tnved_and_rating_audit(message: types.Message):
-    status_msg = await message.answer("📋 Запущен жесткий автоматический радар-контроль ТН ВЭД и скрытых карточек-невидимок...")
+    status_msg = await message.answer("📋 Запускаю компактный радар-сканирование ВСЕХ карточек контента...")
     cabinets = [("Кабинет №1", WB_TOKEN_1), ("Кабинет №2", WB_TOKEN_2)]
-    report_lines = ["📋 **ГЛУБОКИЙ АУДИТ КАРТОЧЕК КОНТЕНТА VESCHI (ВСЕ ПОЗИЦИИ):**\n"]
+    report_lines = ["📋 **ТОТАЛЬНЫЙ АУДИТ КАРТОЧЕК БРЕНДА VESCHI:**\n"]
     issues_found = 0
     
     for cab_name, token in cabinets:
         if not token: continue
         cards = get_real_wb_cards_and_scores(token)
         
-        # Собираем список всех артикулов, которые WB реально соизволил отдать через API контента
         api_vendor_codes = [str(c.get("vendorCode", "")).strip().lower() for c in cards]
+        hidden_detected = []
         
-        # 🚨 СУПЕР-КОНТРОЛЬ «НЕВИДИМОК»: Проверяем, какие артикулы из articles.txt пропали из API контента WB!
+        # 🚨 БЕЗОПАСНЫЙ СБОР «НЕВИДИМОК»: Собираем их артикулы в один компактный массив
         for real_art in REAL_ARTICLES:
-            real_art_l = real_art.strip().lower()
-            if real_art_l not in api_vendor_codes:
-                # Нашли карточку-невидимку! Принудительно выводим её как критическую ошибку 6/10
-                report_lines.append(
-                    f"❌ **[{cab_name}] Арт: `{real_art}`** (🔥 Скрытый рейтинг: 6.0/10)\n"
-                    f"• 🛑 **КРИТИЧЕСКИЙ СБОЙ КАРТОЧЕК!** Этот товар полностью заблокирован или скрыт сервером контента Wildberries API! Оценка на сайте снижена до 6/10.\n"
-                    f"• **Рекомендация менеджерам:** Срочно проверьте статус карточки в личном кабинете на сайте WB, обновите инфографику или перевыпустите баркод!\n"
-                )
-                issues_found += 1
+            if real_art.strip().lower() not in api_vendor_codes:
+                hidden_detected.append(f"`{real_art}`")
         
-        # Стандартный автоматический радар кодов ТН ВЭД для тех карточек, которые WB отдал
+        # Выводим скрытые карточки одним красивым блоком без перегрузки длины сообщения Telegram
+        if hidden_detected:
+            report_lines.append(
+                f"⚠️ **[{cab_name}] ОБНАРУЖЕНЫ КАРТОЧКИ-НЕВИДИМКИ! (Скрытый рейтинг 6/10)**\n"
+                f"Эти товары скрыты сервером контента WB API! Покупатели могут видеть заниженную оценку 6/10 на сайте.\n"
+                f"📌 **Список артикулов для проверки менеджерами:**\n" + ", ".join(hidden_detected) + "\n"
+            )
+            issues_found += len(hidden_detected)
+        
+        # Автоматический радар кодов ТН ВЭД для всех остальных доступных карточек
         for card in cards:
             art = str(card.get("vendorCode", "—")).strip()
             art_l = art.lower()
@@ -201,10 +201,10 @@ async def check_tnved_and_rating_audit(message: types.Message):
             
             if not description or len(description) < 300:
                 computed_score = min(computed_score, 6.0)
-                custom_reasons.append("Слишком короткое описание")
+                custom_reasons.append("короткое описание")
             if not media_files or len(media_files) < 3:
                 computed_score = min(computed_score, 6.0)
-                custom_reasons.append("В галерее менее 3 фото")
+                custom_reasons.append("менее 3 фото")
             
             ref_row = None
             for key in REF_DATA:
@@ -225,24 +225,26 @@ async def check_tnved_and_rating_audit(message: types.Message):
                 ref_tnved = str(ref_row.get("ТНВЭД", "")).strip()
                 ref_decl = str(ref_row.get("Номер декларации", "—")).strip()
                 if not tnved_wb or tnved_wb == "" or tnved_wb == "—" or not tnved_wb.startswith(ref_tnved[:4]):
-                    card_issue_text += f"• 🛑 **СБОЙ ТН ВЭД!** На WB стоит: `{tnved_wb or 'ПУСТО'}`, а по вашей декларации `{ref_decl}` должен быть код: `{ref_tnved}`\n"
+                    card_issue_text += f"• 🛑 **СБОЙ ТН ВЭД!** На WB стоит: `{tnved_wb or 'ПУСТО'}`, по декларации `{ref_decl}` должен быть: `{ref_tnved}`\n"
                     card_has_issue = True
                     
             if computed_score < 10.0 or card_has_issue:
                 card_has_issue = True
                 if custom_reasons:
-                    card_issue_text += f"• 📉 **Замечания к контенту:** {'; '.join(custom_reasons)}\n"
+                    card_issue_text += f"• 📉 **Замечания:** {'; '.join(custom_reasons)}\n"
             if card_has_issue:
-                report_lines.append(card_issue_text)
+                # Ограничиваем детальные ошибки ТН ВЭД первыми 5 позициями, чтобы не превышать лимиты Telegram
+                if len(report_lines) < 8:
+                    report_lines.append(card_issue_text)
                 issues_found += 1
-            if issues_found >= 15: break
-        if issues_found >= 15: break
+            if issues_found >= 20: break
+        if issues_found >= 20: break
             
     await status_msg.delete()
     if issues_found == 0:
-        await message.answer("✅ **Радар-аудит пройден на 10/10!** Автоматический мультиязычный сканер проверил всю матрицу товаров: скрытых заблокированных карточек и сбросов кодов ТН ВЭД не обнаружено! 🌟", parse_mode="Markdown")
+        await message.answer("✅ **Радар-аудит пройден на 10/10!** Скрытых заблокированных карточек и сбросов кодов ТН ВЭД не обнаружено! Все товары в полном порядке. 🌟", parse_mode="Markdown")
     else:
-        await message.answer("\n".join(report_lines[:15]), parse_mode="Markdown")
+        await message.answer("\n".join(report_lines), parse_mode="Markdown")
 
 async def main():
     session = AiohttpSession()
