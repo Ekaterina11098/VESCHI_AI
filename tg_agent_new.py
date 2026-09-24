@@ -16,7 +16,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-24-r6"
+VERSION = "2026-09-24-r7"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -248,9 +248,7 @@ def new_issues(ms, cards1, cards2, wb1, wb2):
         a, b = wb1.get(art, 0), wb2.get(art, 0)
         missing = []
         for label, known, stock in (("К1", known1, a), ("К2", known2, b)):
-            if art not in known:
-                missing.append(f"{label}: карточка не найдена")
-            elif stock <= 0:
+            if art in known and stock <= 0:
                 missing.append(f"{label}: остаток 0")
         if missing:
             issues.append(f"{art}: МСК {qty:g}, WB К1 {a:g}, К2 {b:g}; " + "; ".join(missing))
@@ -323,13 +321,14 @@ def snapshot(with_sales=False):
     return ms, cards1, cards2, wb1, wb2, *speeds, unresolved
 
 
-async def send_issues(message, title, issues):
+async def send_issues(message, title, issues, max_items=30):
     if not issues:
         await message.answer(f"✅ VESCHI AI {VERSION}: {title} — отклонений не найдено")
         return
-    lines = [f"⚠️ VESCHI AI {VERSION}: {title} — найдено {len(issues)}:"] + ["• " + item for item in issues[:30]]
-    if len(issues) > 30:
-        lines.append(f"Показаны первые 30 из {len(issues)}.")
+    shown = issues if max_items is None else issues[:max_items]
+    lines = [f"⚠️ VESCHI AI {VERSION}: {title} — найдено {len(issues)}:"] + ["• " + item for item in shown]
+    if max_items is not None and len(issues) > max_items:
+        lines.append(f"Показаны первые {max_items} из {len(issues)}.")
     chunk = ""
     for line in lines:
         if len(chunk) + len(line) + 1 > 3500:
@@ -385,7 +384,8 @@ async def run_check(message, kind):
                                  f"среди {len(ms)} сопоставленных товаров отклонений нет; "
                                  f"ещё {len(unresolved)} товаров не проверены из-за отсутствующего артикула.")
         else:
-            await send_issues(message, kind.capitalize(), issues)
+            await send_issues(message, kind.capitalize(), issues,
+                              max_items=None if kind == "аудит" else 30)
         if kind != "аудит" and unresolved:
             await message.answer("⚠️ Отдельно проверьте артикулы в МойСклад: " +
                                  ", ".join(unresolved[:10]) +
