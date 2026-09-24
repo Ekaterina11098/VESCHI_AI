@@ -109,14 +109,11 @@ def load_ms_stocks_dict():
                 product = api("GET", href, MS_TOKEN, wb=False)
             art = norm((product or {}).get("article"))
             if not art:
-                unresolved.append(str(row.get("name") or assortment.get("name") or href or "без названия"))
+                unresolved.append(str(row.get("name") or assortment.get("name") or
+                                      (product or {}).get("name") or href or "без названия"))
         if art:
             stocks[art] += amount
-    if unresolved:
-        sample = ", ".join(unresolved[:5])
-        raise CheckError(f"Не удалось сопоставить {len(unresolved)} товаров МСК с артикулом: {sample}. "
-                         "Проверьте артикулы этих товаров в МойСклад")
-    return dict(stocks)
+    return dict(stocks), unresolved
 
 
 def get_real_wb_cards_and_scores(token):
@@ -244,15 +241,16 @@ def card_issues(cards, cabinet, required_by_subject):
         missing = []
         for field, label in (("vendorCode", "артикул продавца"), ("title", "название"),
                              ("description", "описание"), ("photos", "фото"), ("sizes", "размеры/баркоды")):
-            if not card.get(field):
+            if field in card and not card[field]:
                 missing.append(label)
         if card.get("sizes") and not any(s.get("skus") for s in card["sizes"]):
             missing.append("баркод")
-        dimensions = card.get("dimensions") or {}
-        for key, label in (("length", "длина"), ("width", "ширина"),
-                           ("height", "высота"), ("weightBrutto", "вес упаковки")):
-            if float(dimensions.get(key) or 0) <= 0:
-                missing.append(label)
+        if "dimensions" in card:
+            dimensions = card.get("dimensions") or {}
+            for key, label in (("length", "длина"), ("width", "ширина"),
+                               ("height", "высота"), ("weightBrutto", "вес упаковки")):
+                if key in dimensions and float(dimensions[key] or 0) <= 0:
+                    missing.append(label)
         subject = card.get("subjectID")
         if not subject:
             missing.append("ID предмета")
@@ -293,13 +291,13 @@ def get_required_characteristics(token, cards):
 
 def snapshot(with_sales=False):
     required_tokens("MS_TOKEN", "WB_TOKEN_1", "WB_TOKEN_2")
-    ms = load_ms_stocks_dict()
+    ms, unresolved = load_ms_stocks_dict()
     if not ms:
-        raise CheckError("На складе МСК нет товаров с положительным остатком; проверка не выполнена")
+        raise CheckError(f"Нет товаров МСК с артикулом для сверки; без артикула: {len(unresolved)}")
     cards1, wb1 = collect_cabinet(WB_TOKEN_1)
     cards2, wb2 = collect_cabinet(WB_TOKEN_2)
     speeds = (sales_speed(WB_TOKEN_1), sales_speed(WB_TOKEN_2)) if with_sales else ({}, {})
-    return ms, cards1, cards2, wb1, wb2, *speeds
+    return ms, cards1, cards2, wb1, wb2, *speeds, unresolved
 
 
 async def send_issues(message, title, issues):
@@ -308,7 +306,7 @@ async def send_issues(message, title, issues):
         return
     lines = [f"⚠️ {title} — найдено {len(issues)}:"] + ["• " + item for item in issues[:30]]
     if len(issues) > 30:
-        lines.append(f"Показаны первые 30 из {len(issues)}. Уточните критерии аудита для полного списка.")
+        lines.append(f"Показаны первые 30 из {len(issues)}.")
     chunk = ""
     for line in lines:
         if len(chunk) + len(line) + 1 > 3500:
@@ -326,6 +324,7 @@ async def run_check(message, kind):
             required_tokens("WB_TOKEN_1", "WB_TOKEN_2")
             issues = []
             tnved_unverified = 0
+            fields_unverified = defaultdict(int)
             for name, token in (("К1", WB_TOKEN_1), ("К2", WB_TOKEN_2)):
                 cards = await asyncio.to_thread(get_real_wb_cards_and_scores, token)
                 if not cards:
@@ -333,6 +332,15 @@ async def run_check(message, kind):
                 required = await asyncio.to_thread(get_required_characteristics, token, cards)
                 issues.extend(card_issues(cards, name, required))
                 for card in cards:
+                    for key, label in (("title", "название"), ("description", "описание"),
+                                       ("photos", "фото"), ("dimensions", "габариты/вес")):
+                        if key not in card:
+                            fields_unverified[label] += 1
+                    if isinstance(card.get("dimensions"), dict):
+                        for key, label in (("length", "длина"), ("width", "ширина"),
+                                           ("height", "высота"), ("weightBrutto", "вес упаковки")):
+                            if key not in card["dimensions"]:
+                                fields_unverified[label] += 1
                     ids = {c.get("id") for c in required.get(card.get("subjectID"), [])
                            if is_tnved_name(c.get("name"))}
                     exposed = any(c.get("id") in ids or is_tnved_name(c.get("name"))
@@ -340,16 +348,29 @@ async def run_check(message, kind):
                     if "tnved" not in card and "tnvedCode" not in card and not exposed:
                         tnved_unverified += 1
         else:
-            ms, c1, c2, w1, w2, s1, s2 = await asyncio.to_thread(snapshot, kind == "остатки")
+            ms, c1, c2, w1, w2, s1, s2, unresolved = await asyncio.to_thread(snapshot, kind == "остатки")
             if kind == "остатки":
                 issues = stock_issues(ms, w1, w2, s1, s2)
             else:
                 issues = new_issues(ms, c1, c2, w1, w2)
         await status.delete()
-        await send_issues(message, kind.capitalize(), issues)
+        if kind == "аудит" and not issues and (fields_unverified or tnved_unverified):
+            await message.answer("⚠️ Аудит: проверенные поля без отклонений; некоторые поля WB не передал в ответе API.")
+        elif kind != "аудит" and unresolved and not issues:
+            await message.answer(f"⚠️ {kind.capitalize()}: среди {len(ms)} сопоставленных товаров отклонений нет; "
+                                 f"ещё {len(unresolved)} товаров не проверены из-за отсутствующего артикула.")
+        else:
+            await send_issues(message, kind.capitalize(), issues)
+        if kind != "аудит" and unresolved:
+            await message.answer("⚠️ Отдельно проверьте артикулы в МойСклад: " +
+                                 ", ".join(unresolved[:10]) +
+                                 (f" (ещё {len(unresolved) - 10})" if len(unresolved) > 10 else ""))
         if kind == "аудит" and tnved_unverified:
             await message.answer(f"ℹ️ ТН ВЭД нельзя подтвердить по ответу API у {tnved_unverified} карточек: "
                                  "поле не передано. Это не означает, что код отсутствует в личном кабинете WB.")
+        if kind == "аудит" and fields_unverified:
+            summary = ", ".join(f"{label} — {count}" for label, count in fields_unverified.items())
+            await message.answer("ℹ️ Не проверены поля, которые WB не передал в ответе: " + summary)
     except (CheckError, ValueError, TypeError) as exc:
         await status.edit_text(f"❌ Проверка «{kind}» не выполнена: {exc}")
 
@@ -370,10 +391,12 @@ async def run_scheduled_stock_check():
     if not MY_CHAT_ID:
         return
     try:
-        ms, _, _, w1, w2, s1, s2 = await asyncio.to_thread(snapshot, True)
+        ms, _, _, w1, w2, s1, s2, unresolved = await asyncio.to_thread(snapshot, True)
         issues = stock_issues(ms, w1, w2, s1, s2)
         if issues:
             await send_issues(_BotMessage(MY_CHAT_ID), "Автопроверка остатков", issues)
+        if unresolved:
+            await _BotMessage(MY_CHAT_ID).answer(f"⚠️ Автопроверка не охватила {len(unresolved)} товаров МСК без артикула")
     except CheckError as exc:
         await _BotMessage(MY_CHAT_ID).answer(f"❌ Автопроверка не выполнена: {exc}")
 
