@@ -16,7 +16,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-24-r7"
+VERSION = "2026-09-24-r9"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -251,7 +251,7 @@ def new_issues(ms, cards1, cards2, wb1, wb2):
             if art in known and stock <= 0:
                 missing.append(f"{label}: остаток 0")
         if missing:
-            issues.append(f"{art}: МСК {qty:g}, WB К1 {a:g}, К2 {b:g}; " + "; ".join(missing))
+            issues.append(f"{art}: МСК {qty:g}; WB " + "; ".join(missing))
     return issues
 
 
