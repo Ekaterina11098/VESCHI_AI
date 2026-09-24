@@ -176,12 +176,23 @@ async def check_tnved_and_rating_audit(message: types.Message):
         await message.answer("\n".join(report_lines[:15]), parse_mode="Markdown")
 
 async def main():
-    session = AiohttpSession()
-    session.api.request_timeout = 30
+    # 🌐 ПРАВИЛЬНЫЙ ОБЛАЧНЫЙ ТАЙМАУТ ДЛЯ VPN БЕЗ ОШИБОК ЗАМОРОЗКИ
+    # Передаем время ожидания напрямую в настройки сессии при ее создании
+    timeout_settings = aiohttp.ClientTimeout(total=45, connect=15, sock_read=15)
+    session = AiohttpSession(timeout=timeout_settings)
+    
     global bot
     bot = Bot(token=BOT_TOKEN, session=session)
+    
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(run_scheduled_stock_check, CronTrigger(hour="9,15", minute="0"))
     scheduler.start()
+    print("⏰ Планировщик отчетов (9:00 и 15:00 МСК) успешно запущен.")
+    print("👜 Боевой асинхронный ИИ-агент VESCHI запущен и слушает чат...")
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
