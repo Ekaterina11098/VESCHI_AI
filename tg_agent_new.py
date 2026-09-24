@@ -16,7 +16,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-24-r10"
+VERSION = "2026-09-24-r11"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -373,6 +373,7 @@ async def run_check(message, kind):
             required_tokens("WB_TOKEN_1", "WB_TOKEN_2")
             issues = []
             tnved_unverified = 0
+            tnved_unverified_articles = []
             fields_unverified = defaultdict(int)
             for name, token in (("К1", WB_TOKEN_1), ("К2", WB_TOKEN_2)):
                 cards = await asyncio.to_thread(get_real_wb_cards_and_scores, token)
@@ -396,6 +397,8 @@ async def run_check(message, kind):
                                   for c in card.get("characteristics") or [])
                     if "tnved" not in card and "tnvedCode" not in card and not exposed:
                         tnved_unverified += 1
+                        article = str(card.get("vendorCode") or card.get("nmID") or "без артикула")
+                        tnved_unverified_articles.append(f"{name} {article}: ТН ВЭД не передан API")
         else:
             ms, c1, c2, w1, w2, s1, s2, unresolved = await asyncio.to_thread(snapshot, kind == "остатки")
             if kind == "остатки":
@@ -420,6 +423,8 @@ async def run_check(message, kind):
         if kind == "аудит" and tnved_unverified:
             await message.answer(f"ℹ️ ТН ВЭД нельзя подтвердить по ответу API у {tnved_unverified} карточек: "
                                  "поле не передано. Это не означает, что код отсутствует в личном кабинете WB.")
+            await send_issues(message, "ТН ВЭД не проверен по API", tnved_unverified_articles,
+                              max_items=None)
         if kind == "аудит" and fields_unverified:
             summary = ", ".join(f"{label} — {count}" for label, count in fields_unverified.items())
             await message.answer("ℹ️ Не проверены поля, которые WB не передал в ответе: " + summary)
