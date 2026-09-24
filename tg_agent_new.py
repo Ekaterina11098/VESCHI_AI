@@ -16,7 +16,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-24-r9"
+VERSION = "2026-09-24-r10"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -78,13 +78,23 @@ def ms_rows(url, **params):
     return rows
 
 
+def is_exact_ms_store_entry(entry, store):
+    """Only a stock row belonging to this exact store can enter the MCK total."""
+    expected_id = str(store.get("id") or urlparse(store.get("meta", {}).get("href") or "").path.rsplit("/", 1)[-1])
+    actual_id = urlparse(entry.get("meta", {}).get("href") or "").path.rsplit("/", 1)[-1]
+    if not expected_id or actual_id != expected_id:
+        return False
+    return not entry.get("name") or norm(entry["name"]) == norm(store.get("name"))
+
+
 def load_ms_stocks_dict():
     required_tokens("MS_TOKEN")
     stores = ms_rows(f"{MS_API}/entity/store")
     matches = [s for s in stores if norm(s.get("name")) == norm(MS_STORE_NAME)]
     if len(matches) != 1:
         raise CheckError(f"Нужен один склад МойСклад с точным именем «{MS_STORE_NAME}», найдено: {len(matches)}")
-    store_href = matches[0].get("meta", {}).get("href")
+    selected_store = matches[0]
+    store_href = selected_store.get("meta", {}).get("href")
     if not store_href:
         raise CheckError("Нет ссылки на склад МСК в ответе МойСклад")
     rows = ms_rows(f"{MS_API}/report/stock/bystore", filter=f"store={store_href}")
@@ -98,7 +108,7 @@ def load_ms_stocks_dict():
         if not isinstance(entries, list):
             raise CheckError("Отчёт МойСклад не содержит stockByStore")
         amount = sum(float(e.get("stock") or 0) for e in entries
-                     if urlparse(e.get("meta", {}).get("href") or "").path == urlparse(store_href).path)
+                     if is_exact_ms_store_entry(e, selected_store))
         if amount <= 0:
             continue
         assortment = row.get("assortment") or {}
@@ -119,6 +129,23 @@ def load_ms_stocks_dict():
         if art:
             stocks[art] += amount
     return dict(stocks), unresolved
+
+
+def ms_store_diagnostics():
+    required_tokens("MS_TOKEN")
+    stores = ms_rows(f"{MS_API}/entity/store")
+    rows = ms_rows(f"{MS_API}/report/stock/bystore")
+    summary = []
+    for store in stores:
+        count, quantity = 0, 0.0
+        for row in rows:
+            amount = sum(float(e.get("stock") or 0) for e in row.get("stockByStore") or []
+                         if is_exact_ms_store_entry(e, store))
+            if amount > 0:
+                count += 1
+                quantity += amount
+        summary.append((str(store.get("name") or "без названия"), count, quantity))
+    return summary
 
 
 def get_real_wb_cards_and_scores(token):
@@ -429,6 +456,18 @@ async def cmd_diagnostics(message: types.Message):
         await message.answer("\n".join(lines))
     except CheckError as exc:
         await message.answer(f"❌ Диагностика не выполнена: {exc}")
+
+
+@dp.message(Command("msdiagnostics"))
+async def cmd_msdiagnostics(message: types.Message):
+    try:
+        summary = await asyncio.to_thread(ms_store_diagnostics)
+        lines = [f"VESCHI AI {VERSION}: остатки по отдельным складам МойСклад (физический stock):"]
+        lines.extend(f"{name}: товаров с остатком {count}, всего {total:g} шт."
+                     for name, count, total in summary)
+        await message.answer("\n".join(lines)[:3800])
+    except CheckError as exc:
+        await message.answer(f"❌ Диагностика МойСклад не выполнена: {exc}")
 
 
 @dp.message(lambda message: message.text and message.text.strip().casefold() in {"остатки", "новинки", "аудит"})
