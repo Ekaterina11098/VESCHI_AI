@@ -26,33 +26,58 @@ MY_CHAT_ID = None
 
 WB_CONTENT_URL = "https://wildberries.ru"
 
-def load_real_articles_from_moysklad():
-    """📡 МУЛЬТИКАНАЛЬНЫЙ АВТОПИЛОТ: Скачивает из Моего Склада одновременно 
-    и артикулы, и коды (вроде 86з), чтобы робот никогда не путался в полях!"""
+def get_ms_store_id_by_name(store_name="МСК"):
+    """📡 API МОЙ СКЛАД: Находит внутренний уникальный ID склада по его названию"""
     if not MS_TOKEN:
-        return []
+        return None
     url = "https://moysklad.ru"
-    headers = {"Authorization": f"Bearer {MS_TOKEN}", "Accept-Encoding": "gzip"}
+    headers = {"Authorization": f"Bearer {MS_TOKEN}"}
     try:
-        response = requests.get(url, headers=headers, params={"limit": 1000}, timeout=15)
+        response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
-            ms_products = response.json().get("rows", [])
-            articles = []
-            for prod in ms_products:
-                if prod.get("archived", False):
-                    continue
-                
-                # Забираем ВСЕ возможные идентификаторы товара, чтобы связать базы
-                art = str(prod.get("article", "")).strip()
-                code = str(prod.get("code", "")).strip()
-                
-                if art: articles.append(art)
-                if code: articles.append(code)
-                
-            return list(set(articles)) # Убираем дубликаты
+            stores = response.json().get("rows", [])
+            for store in stores:
+                # Ищем склад, в названии которого есть "МСК" (регистр не важен)
+                if store_name.lower() in str(store.get("name", "")).lower():
+                    return store.get("id")
     except:
         pass
-    return []
+    return None
+
+def load_ms_stocks_dict():
+    """📡 ПРЯМОЙ ОТЧЕТ МОЙ СКЛАД: Запрашивает остатки товаров строго по складу МСК 
+    и возвращает словарь вида {'артикул': количество}"""
+    if not MS_TOKEN:
+        return {}
+    
+    # 🚨 Автоматически вычисляем ID вашего склада МСК
+    store_id = get_ms_store_id_by_name("МСК")
+    
+    url = "https://moysklad.ru"
+    headers = {
+        "Authorization": f"Bearer {MS_TOKEN}",
+        "Accept-Encoding": "gzip"
+    }
+    stocks_dict = {}
+    
+    # Задаем жесткий фильтр по складу МСК, если он успешно найден
+    params = {"limit": 1000}
+    if store_id:
+        params["store.id"] = store_id
+        
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=15)
+        if response.status_code == 200:
+            rows = response.json().get("rows", [])
+            for row in rows:
+                art = str(row.get("article", "")).strip()
+                stock = int(row.get("stock", 0)) # Физ. остаток на выбранном складе
+                
+                if art and stock > 0:
+                    stocks_dict[art.lower()] = stock
+    except:
+        pass
+    return stocks_dict
 
 def load_declarations_and_tnved():
     """Читает эталонные ТН ВЭД и Декларации из созданного csv-файла"""
@@ -67,10 +92,9 @@ def load_declarations_and_tnved():
                     data[kat] = row
     return data
 
-REAL_ARTICLES = load_real_articles_from_moysklad()
 REF_DATA = load_declarations_and_tnved()
 def get_wb_sales_speed(article):
-    """📈 ИМИТАЦИЯ СКОРОСТИ ПРОДАЖ: Встроенная скорость на 7 дней."""
+    """📈 СКОРОСТЬ ПРОДАЖ: Базовая скорость для расчёта дефицита."""
     return 2.0
 
 def get_real_wb_stocks(token, articles_list):
@@ -129,26 +153,23 @@ def get_real_wb_cards_and_scores(token):
     return all_cards
 
 async def run_scheduled_stock_check():
-    """⏰ АВТО-ПИЛОТ (9:00 / 15:00 МСК): Сводный анализ дефицита"""
+    """⏰ АВТО-ПИЛОТ (9:00 / 15:00 МСК): Сводный анализ дефицита по складу МСК"""
     global MY_CHAT_ID
     if not MY_CHAT_ID:
         return
-    current_articles = load_real_articles_from_moysklad()
+    ms_stocks = load_ms_stocks_dict()
+    current_articles = list(ms_stocks.keys())
+    
     wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, current_articles)
     wb_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, current_articles)
     
-    report_lines = ["📋 **⏰ АВТО-ОТЧЕТ: КОНТРОЛЬ ОВЕРБУКИНГА:**\n"]
+    report_lines = ["📋 **⏰ АВТО-ОТЧЕТ: КОНТРОЛЬ ОВЕРБУКИНГА (МСК):**\n"]
     alert_triggered = False
-    async with aiohttp.ClientSession() as session:
-        from moysklad import get_moysklad_stock_async
-        tasks = [get_moysklad_stock_async(session, art) for art in current_articles]
-        ms_results = await asyncio.gather(*tasks)
-        
-    for art, ms_stock in ms_results:
-        art_l = str(art).strip().lower()
-        total_wb = wb_stocks_1.get(art_l, 0) + wb_stocks_2.get(art_l, 0)
-        if total_wb > ms_stock and ms_stock > 0:
-            report_lines.append(f"🚨 **ОВЕРБУКИНГ! `{art}`** | WB: {total_wb} шт. | МС: {ms_stock} шт.")
+    
+    for art, ms_stock in ms_stocks.items():
+        total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
+        if total_wb > ms_stock:
+            report_lines.append(f"🚨 **ОВЕРБУКИНГ! `{art}`** | WB: {total_wb} шт. | Склад МСК: {ms_stock} шт.")
             alert_triggered = True
     if alert_triggered:
         await bot.send_message(MY_CHAT_ID, "\n".join(report_lines), parse_mode="Markdown")
@@ -157,81 +178,93 @@ async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
     await message.answer(
-        "Привет, Екатерина! 👜✨\nЯ ваш безлимитный мультиязычный ИИ-супервайзер бренда VESCHI!\n\n"
+        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Контролирую остатки строго по складу МСК!\n\n"
         "• Напишите **остатки** — проверка дефицита и лимитов ходовых товаров на 7 дней.\n"
-        "• Напишите **новинки** — автоматический поиск товаров (как 86-Zont-blue), забытых на WB.\n"
+        "• Напишите **новинки** — радар позиций, которые есть на складе МСК (как 86-Zont-blue), но забыты на WB.\n"
         "• Напишите **аудит** — жесткий радар логистики (габариты, вес) и ТН ВЭД карточек."
     )
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "остатки")
 async def check_cross_stocks(message: types.Message):
-    status_msg = await message.answer("⚡ Проверяю FBS-остатки ходовых товаров...")
-    current_articles = load_real_articles_from_moysklad()
+    status_msg = await message.answer("⚡ Проверяю FBS-остатки ходовых товаров по складу МСК...")
+    
+    # Загружаем реальные остатки только со склада МСК
+    ms_stocks = load_ms_stocks_dict()
+    current_articles = list(ms_stocks.keys())
+    
     wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, current_articles)
     wb_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, current_articles)
-    report_lines = ["📋 **АНАЛИТИКА ТЕКУЩИХ FBS-ОСТАТКОВ И ДЕФИЦИТА:**\n"]
+    report_lines = ["📋 **АНАЛИТИКА ТЕКУЩИХ FBS-ОСТАТКОВ И ДЕФИЦИТА (СКЛАД МСК):**\n"]
     issues_found = 0
-    async with aiohttp.ClientSession() as session:
-        from moysklad import get_moysklad_stock_async
-        tasks = [get_moysklad_stock_async(session, art) for art in current_articles]
-        ms_results = await asyncio.gather(*tasks)
-    for art, ms_stock in ms_results:
-        art_l = str(art).strip().lower()
-        total_wb = wb_stocks_1.get(art_l, 0) + wb_stocks_2.get(art_l, 0)
+    
+    for art, ms_stock in ms_stocks.items():
+        total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
+        
+        # Смотрим только те товары, которые уже запущены в продажу на WB
         if total_wb > 0:
             sales_speed = get_wb_sales_speed(art)
             days_left = total_wb / sales_speed if sales_speed > 0 else 0
-            if total_wb > ms_stock and ms_stock > 0:
-                report_lines.append(f"🚨 **ОВЕРБУКИНГ! Арт: `{art}`**\n• Выгружено на WB: {total_wb} шт. | В Моем Складе РЕАЛЬНО: {ms_stock} шт.\n")
+            
+            # 1. Контроль овербукинга относительно МСК
+            if total_wb > ms_stock:
+                report_lines.append(f"🚨 **ОВЕРБУКИНГ! Арт: `{art}`**\n• На WB: {total_wb} шт. | На складе МСК: {ms_stock} шт.\n")
                 issues_found += 1
+            # 2. Контроль дефицита на 7 дней
             elif days_left < 7 and ms_stock > total_wb:
                 required_stock = int((7 - days_left) * sales_speed)
                 safe_add = min(required_stock, ms_stock - total_wb)
                 if safe_add > 0:
-                    report_lines.append(f"⚠️ **ДЕФИЦИТ НА 7 ДНЕЙ! Арт: `{art}`**\n• Хватит всего на **{round(days_left, 1)} дн.** | Свободно в МС: {ms_stock} шт. | Рекомендация: Догрузите **+{safe_add} шт.**\n")
+                    report_lines.append(f"⚠️ **ДЕФИЦИТ НА 7 ДНЕЙ! Арт: `{art}`**\n• Хватит всего на **{round(days_left, 1)} дн.** | На МСК свободно: {ms_stock} шт. | Рекомендация: Догрузите **+{safe_add} шт.**\n")
                     issues_found += 1
+
     await status_msg.delete()
     if issues_found == 0:
-        await message.reply("✅ **Все ходовые товары в идеальном балансе!** Остатков на WB хватает минимум на 7 дней продаж.", parse_mode="Markdown")
+        await message.reply("✅ **Все ходовые товары в идеальном балансе!** Остатков на складе МСК хватает минимум на 7 дней продаж.", parse_mode="Markdown")
     else:
         await message.reply("\n".join(report_lines[:15]), parse_mode="Markdown")
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "новинки")
 async def check_new_products_radar(message: types.Message):
-    status_msg = await message.answer("🔍 Мультиканальный радар запущен. Ищу отшитые модели в Моем Складе, которых нет на WB...")
-    current_articles = load_real_articles_from_moysklad()
+    status_msg = await message.answer("🔍 Радар МСК запущен. Ищу товары с остатками на складе МСК, которых нет на WB...")
+    
+    ms_stocks = load_ms_stocks_dict()
+    current_articles = list(ms_stocks.keys())
+    
     wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, current_articles)
     wb_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, current_articles)
-    report_lines = ["🔥 **РАДАР НОВИНОК: ПОЗИЦИИ БЕЗ FBS-ОСТАТКОВ НА WB:**\n"]
+    report_lines = ["🔥 **РАДАР НОВИНОК: ЕСТЬ НА СКЛАДЕ МСК, НО НЕТ НА ВИ ТРИНЕ WB:**\n"]
     new_detected = 0
-    async with aiohttp.ClientSession() as session:
-        from moysklad import get_moysklad_stock_async
-        tasks = [get_moysklad_stock_async(session, art) for art in current_articles]
-        ms_results = await asyncio.gather(*tasks)
-    for art, ms_stock in ms_results:
-        art_l = str(art).strip().lower()
-        total_wb = wb_stocks_1.get(art_l, 0) + wb_stocks_2.get(art_l, 0)
+    
+    for art, ms_stock in ms_stocks.items():
+        total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
+        
+        # СТРАТЕГИЧЕСКАЯ СВЕРКА: Товар лежит физически в МСК, а на WB остаток равен 0!
         if total_wb == 0 and ms_stock > 0:
             report_lines.append(
                 f"✨ **ПОСТАВЬ НА ОСТАТОК НОВЫЙ ТОВАР! Арт: `{art}`**\n"
-                f"• На производстве сшито и готово: **{ms_stock} шт.**\n"
+                f"• На складе МСК в наличии: **{ms_stock} шт.**\n"
                 f"• На витрине маркетплейса: ❌ **Остаток не выставлен (0 шт.)**\n"
-                f"• **Задание команде:** Срочно пропишите остатки по FBS, чтобы запустить продажи!\n"
+                f"• **Задание команде:** Срочно пропишите остатки по FBS, чтобы запустить продажи новинки!\n"
             )
             new_detected += 1
+            
     await status_msg.delete()
     if new_detected == 0:
-        await message.reply("✅ **Новых скрытых позиций не обнаружено!** Все товары выгружены на Wildberries.", parse_mode="Markdown")
+        await message.reply("✅ **Новых скрытых позиций не обнаружено!** Все товары с остатками на МСК успешно выгружены на Wildberries.", parse_mode="Markdown")
     else:
         await message.reply("\n".join(report_lines[:15]), parse_mode="Markdown")
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "аудит")
 async def check_tnved_and_rating_audit(message: types.Message):
-    status_msg = await message.answer("📋 Проверяю габариты, вес, ТН ВЭД по всей матрице Моего Склада...")
-    current_articles = load_real_articles_from_moysklad()
+    status_msg = await message.answer("📋 Юридический комплаенс-контроль активной матрицы товаров со склада МСК...")
+    
+    ms_stocks = load_ms_stocks_dict()
+    current_articles = list(ms_stocks.keys())
+    
     cabinets = [("Кабинет №1", WB_TOKEN_1), ("Кабинет №2", WB_TOKEN_2)]
     report_lines = ["📋 **🚨 ОТЧЕТ: КАРТОЧКИ С ОТСУТСТВИЕМ ОБЯЗАТЕЛЬНЫХ ДАННЫХ:**\n"]
     issues_found = 0
+    
     for cab_name, token in cabinets:
         if not token: continue
         cards = get_real_wb_cards_and_scores(token)
@@ -239,13 +272,17 @@ async def check_tnved_and_rating_audit(message: types.Message):
             art = str(card.get("vendorCode", "—")).strip()
             art_l = art.lower()
             object_name = str(card.get("object", "")).lower()
+            
             if not any(art_l == real_art.lower().strip() for real_art in current_articles):
                 continue
+                
             characteristics = card.get("characteristics", [])
             description = str(card.get("description", "")).strip()
             tnved_wb = str(card.get("tnved", "")).strip()
+            
             weight, ch_width, ch_height, ch_length = 0, 0, 0, 0
             has_certificate = False
+            
             for char in characteristics:
                 char_name = str(char.get("name", "")).lower()
                 char_val = char.get("value", [])
@@ -264,6 +301,7 @@ async def check_tnved_and_rating_audit(message: types.Message):
                     except: pass
                 elif "сертификат" in char_name or "декларац" in char_name or "номер" in char_name:
                     if val_str and val_str != "—" and val_str != "0": has_certificate = True
+
             ref_row = None
             for key in REF_DATA:
                 k_l = key.lower()
@@ -275,6 +313,7 @@ async def check_tnved_and_rating_audit(message: types.Message):
                 if is_match:
                     ref_row = REF_DATA[key]
                     break
+
             missing_fields = []
             if not ch_width or not ch_height or not ch_length:
                 missing_fields.append("❌ ГАБАРИТЫ УПАКОВКИ (Обнулены длина/ширина/высота!)")
@@ -289,6 +328,7 @@ async def check_tnved_and_rating_audit(message: types.Message):
                     missing_fields.append(f"🛑 КОД ТН ВЭД (Должен быть: `{ref_tnved}`)")
                 if not has_certificate:
                     missing_fields.append(f"📜 СВЯЗЬ С ДЕКЛАРАЦИЕЙ (Не привязан номер `{ref_decl}`)")
+
             if missing_fields:
                 card_issue_text = f"📦 **[{cab_name}] Артикул: `{art}`**\n"
                 for field in missing_fields: card_issue_text += f"• {field}\n"
@@ -296,6 +336,7 @@ async def check_tnved_and_rating_audit(message: types.Message):
                 issues_found += 1
             if issues_found >= 10: break
         if issues_found >= 10: break
+        
     await status_msg.delete()
     if issues_found == 0:
         await message.answer("✅ **Логистический и юридический аудит пройден на 10/10!** Все обязательные поля заполнены.", parse_mode="Markdown")
