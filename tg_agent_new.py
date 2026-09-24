@@ -1,441 +1,362 @@
-import os
+"""Telegram checks for MoySklad Moscow stock and two independent WB accounts.
+
+Read only: this module never changes WB stock or product cards.
+"""
 import asyncio
-import aiohttp
+import math
+import os
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+
 import requests
-import csv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 
 load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WB_TOKEN_1 = os.getenv("WB_API_TOKEN")
-WB_TOKEN_2 = os.getenv("WB_API_TOKEN_2") or WB_TOKEN_1
+WB_TOKEN_2 = os.getenv("WB_API_TOKEN_2")
 MS_TOKEN = os.getenv("MOYSKLAD_API_TOKEN")
+MS_STORE_NAME = os.getenv("MOYSKLAD_STORE_NAME", "МСК")
+SALES_DAYS = int(os.getenv("SALES_DAYS", "28"))
+MS_API = "https://api.moysklad.ru/api/remap/1.2"
+WB_CONTENT = "https://content-api.wildberries.ru"
+WB_MARKET = "https://marketplace-api.wildberries.ru"
+WB_STATS = "https://statistics-api.wildberries.ru"
 
-if not BOT_TOKEN:
-    raise RuntimeError("Не найден TELEGRAM_BOT_TOKEN в файле .env")
-
-bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-MY_CHAT_ID = None 
+MY_CHAT_ID = None
 
-# Официальный стабильный шлюз сквозной курсорной пагинации контента WB v2
-WB_CONTENT_URL = "https://wildberries.ru"
 
-def get_ms_store_id_by_name(store_name="МСК"):
-    """📡 API МОЙ СКЛАД: Находит внутренний уникальный ID склада по его названию"""
-    if not MS_TOKEN:
-        return None
-    url = "https://moysklad.ru"
-    headers = {"Authorization": f"Bearer {MS_TOKEN}"}
+class CheckError(RuntimeError):
+    """Incomplete input or API response: never interpret as an empty inventory."""
+
+
+def norm(value):
+    return str(value or "").strip().casefold()
+
+
+def required_tokens(*names):
+    missing = [name for name in names if not globals()[name]]
+    if missing:
+        raise CheckError("Нет настроек: " + ", ".join(missing))
+    if WB_TOKEN_1 and WB_TOKEN_2 and WB_TOKEN_1 == WB_TOKEN_2:
+        raise CheckError("Два кабинета настроены на один токен WB")
+
+
+def api(method, url, token, *, wb=True, **kwargs):
+    headers = {"Authorization": token if wb else f"Bearer {token}"}
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            stores = response.json().get("rows", [])
-            for store in stores:
-                if store_name.lower() in str(store.get("name", "")).lower():
-                    return store.get("id")
-    except:
-        pass
-    return None
+        res = requests.request(method, url, headers=headers, timeout=30, **kwargs)
+        res.raise_for_status()
+        return res.json()
+    except (requests.RequestException, ValueError) as exc:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        raise CheckError(f"Ошибка API {url.split('/')[2]}: HTTP {code or 'сеть/формат ответа'}") from exc
+
+
+def ms_rows(url, **params):
+    """Read all pages; avoid silently dropping products beyond the first 1000."""
+    rows, offset = [], 0
+    while True:
+        data = api("GET", url, MS_TOKEN, wb=False, params={**params, "limit": 1000, "offset": offset})
+        page = data.get("rows")
+        if not isinstance(page, list):
+            raise CheckError("МойСклад вернул ответ без rows")
+        rows.extend(page)
+        if len(page) < 1000:
+            break
+        offset += len(page)
+    return rows
+
 
 def load_ms_stocks_dict():
-    """📡 POST-АНАЛИЗ МСК: Выгружает реальные остатки по складу МСК, 
-    выравнивая регистр текстовых артикулов для безошибочного слияния баз."""
-    if not MS_TOKEN:
-        return {}
-    
-    store_id = get_ms_store_id_by_name("МСК")
-    stocks_dict = {}
-    
-    url = "https://moysklad.ru"
-    headers = {
-        "Authorization": f"Bearer {MS_TOKEN}",
-        "Content-Type": "application/json",
-        "Accept-Encoding": "gzip"
-    }
-    
-    params = {"limit": 1000}
-    if store_id:
-        params["storeId"] = store_id
-        
-    try:
-        response = requests.post(url, headers=headers, json={}, params=params, timeout=15)
-        if response.status_code == 200:
-            rows = response.json().get("rows", [])
-            for row in rows:
-                stock = int(row.get("stock", 0)) 
-                if stock <= 0:
-                    continue
-                
-                art = str(row.get("article", "")).strip()
-                if not art and "product" in row:
-                    prod_data = row.get("product", {})
-                    art = str(prod_data.get("article", "")).strip()
-                
-                if art:
-                    stocks_dict[art.lower().strip()] = stock
-    except:
-        pass
-    return stocks_dict
-def get_wb_warehouse_ids(token):
-    """📡 API WILDBERRIES: Автоматически скачивает ID всех FBS-складов продавца"""
-    if not token:
-        return []
-    url = "https://wildberries.ru"
-    headers = {"Authorization": token}
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            return [int(w.get("id")) for w in response.json() if w.get("id")]
-    except:
-        pass
-    return []
+    required_tokens("MS_TOKEN")
+    stores = ms_rows(f"{MS_API}/entity/store")
+    matches = [s for s in stores if norm(s.get("name")) == norm(MS_STORE_NAME)]
+    if len(matches) != 1:
+        raise CheckError(f"Нужен один склад МойСклад с точным именем «{MS_STORE_NAME}», найдено: {len(matches)}")
+    store_href = matches[0].get("meta", {}).get("href")
+    if not store_href:
+        raise CheckError("Нет ссылки на склад МСК в ответе МойСклад")
+    rows = ms_rows(f"{MS_API}/report/stock/bystore", filter=f"store={store_href}")
+    stocks = defaultdict(float)
+    missing_article = 0
+    for row in rows:
+        entries = row.get("stockByStore")
+        if not isinstance(entries, list):
+            raise CheckError("Отчёт МойСклад не содержит stockByStore")
+        amount = sum(float(e.get("stock") or 0) for e in entries
+                     if e.get("meta", {}).get("href") == store_href)
+        if amount <= 0:
+            continue
+        art = norm(row.get("article"))
+        if not art:
+            missing_article += 1
+        else:
+            stocks[art] += amount
+    if missing_article:
+        raise CheckError(f"У {missing_article} товаров на МСК есть остаток, но нет артикула для сверки")
+    return dict(stocks)
 
-def get_wb_sales_speed(article):
-    """📈 СКОРОСТЬ ПРОДАЖ: Базовая скорость для расчёта дефицита."""
-    return 2.0
-
-def get_real_wb_stocks(token, barcodes_list, warehouse_id):
-    """📡 FBS API WB: Запрашивает остатки строго по цифровым баркодам (skus) через Marketplace API v3."""
-    if not token or not barcodes_list or not warehouse_id:
-        return {}
-    
-    url = f"https://wildberries.ru{warehouse_id}"
-    headers = {
-        "Authorization": token,
-        "Content-Type": "application/json"
-    }
-    wb_stocks_dict = {}
-    
-    for i in range(0, len(barcodes_list), 100):
-        chunk = barcodes_list[i:i+100]
-        try:
-            payload = {"skus": chunk}
-            response = requests.post(url, headers=headers, json=payload, timeout=15)
-            if response.status_code == 200:
-                wb_data = response.json().get("stocks", [])
-                for item in wb_data:
-                    sku = str(item.get("sku", "")).strip()
-                    amount = int(item.get("amount", 0))
-                    if sku:
-                        wb_stocks_dict[sku] = amount
-        except:
-            pass
-    return wb_stocks_dict
 
 def get_real_wb_cards_and_scores(token):
-    """📡 API КОНТЕНТА V2: Скачивает абсолютно 100% карточек продавца со всех страниц."""
     if not token:
-        return []
-    headers = {
-        "Authorization": token,
-        "Content-Type": "application/json"
-    }
-    all_cards = []
-    
-    payload = {
-        "settings": {
-            "cursor": {
-                "limit": 100
-            },
-            "filter": {
-                "withPhoto": -1
-            }
-        }
-    }
-    
+        raise CheckError("Нет токена WB для получения карточек")
+    cards, cursor, seen = [], {"limit": 100}, set()
     while True:
-        try:
-            res = requests.post(WB_CONTENT_URL, headers=headers, json=payload, timeout=15)
-            if res.status_code == 200:
-                data = res.json().get("data", {})
-                cards = data.get("cards", [])
-                if not cards:
-                    break
-                all_cards.extend(cards)
-                
-                next_cursor = data.get("cursor", {})
-                updated_at = next_cursor.get("updatedAt")
-                nm_id = next_cursor.get("nmId")
-                
-                if len(cards) < 100 or not updated_at or not nm_id:
-                    break
-                    
-                payload["settings"]["cursor"] = {
-                    "limit": 100, 
-                    "updatedAt": updated_at, 
-                    "nmId": nm_id
-                }
-            else:
-                break
-        except:
+        body = {"settings": {"cursor": cursor, "filter": {"withPhoto": -1}}}
+        data = api("POST", f"{WB_CONTENT}/content/v2/get/cards/list", token, json=body)
+        if data.get("error"):
+            raise CheckError("WB Content сообщил об ошибке выгрузки карточек")
+        if not isinstance(data.get("cards"), list) or not isinstance(data.get("cursor"), dict):
+            # Some API versions wrap the response in data.
+            data = data.get("data") if isinstance(data.get("data"), dict) else data
+        if not isinstance(data.get("cards"), list) or not isinstance(data.get("cursor"), dict):
+            raise CheckError("WB Content вернул неполный список карточек")
+        page = data["cards"]
+        cards.extend(page)
+        if len(page) < 100:
             break
-    return all_cards
+        marker = (data["cursor"].get("updatedAt"), data["cursor"].get("nmID"))
+        if not all(marker) or marker in seen:
+            raise CheckError("Не удалось получить все страницы карточек WB")
+        seen.add(marker)
+        cursor = {"limit": 100, "updatedAt": marker[0], "nmID": marker[1]}
+    return cards
 
-def load_declarations_and_tnved():
-    """Читает эталонные ТН ВЭД и Декларации из созданного csv-файла"""
-    file_path = os.path.join(os.path.dirname(__file__), "declarations_tnved.csv")
-    data = {}
-    if os.path.exists(file_path):
-        with open(file_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                kat = row.get("Категория", "").strip().lower()
-                if kat:
-                    data[kat] = row
-    return data
 
-REF_DATA = load_declarations_and_tnved()
-async def run_scheduled_stock_check():
-    """⏰ АВТО-ПИЛОТ (9:00 / 15:00 МСК): Сводный анализ дефицита по складу МСК"""
-    global MY_CHAT_ID
-    if not MY_CHAT_ID:
+def get_wb_warehouse_ids(token):
+    data = api("GET", f"{WB_MARKET}/api/v3/warehouses", token)
+    if not isinstance(data, list) or not data:
+        raise CheckError("WB не вернул ни одного FBS-склада")
+    ids = [item.get("id") for item in data]
+    if not all(ids):
+        raise CheckError("У FBS-склада нет ID")
+    return ids
+
+
+def get_real_wb_stocks(token, skus, warehouse_id):
+    result = {}
+    for start in range(0, len(skus), 100):
+        data = api("POST", f"{WB_MARKET}/api/v3/stocks/{warehouse_id}", token,
+                   json={"skus": skus[start:start + 100]})
+        if not isinstance(data.get("stocks"), list):
+            raise CheckError("WB Stocks вернул ответ без stocks")
+        for item in data["stocks"]:
+            sku = str(item.get("sku") or "").strip()
+            if sku:
+                result[sku] = float(item.get("amount") or 0)
+    return result
+
+
+def collect_cabinet(token, include_stock=True):
+    cards = get_real_wb_cards_and_scores(token)
+    article_skus = defaultdict(set)
+    for card in cards:
+        article = norm(card.get("vendorCode"))
+        if article:
+            for size in card.get("sizes") or []:
+                article_skus[article].update(str(s).strip() for s in (size.get("skus") or []) if s)
+    totals = defaultdict(float)
+    if include_stock:
+        skus = sorted({sku for items in article_skus.values() for sku in items})
+        warehouse_ids = get_wb_warehouse_ids(token)
+        for warehouse_id in warehouse_ids:
+            amounts = get_real_wb_stocks(token, skus, warehouse_id)
+            for article, article_codes in article_skus.items():
+                totals[article] += sum(amounts.get(sku, 0) for sku in article_codes)
+    return cards, dict(totals)
+
+
+def sales_speed(token, days=SALES_DAYS):
+    """Average daily actual sales over a fixed calendar interval, returns excluded."""
+    if days < 1 or days > 89:
+        raise CheckError("SALES_DAYS должен быть от 1 до 89")
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    data = api("GET", f"{WB_STATS}/api/v1/supplier/sales", token,
+               params={"dateFrom": since.strftime("%Y-%m-%dT%H:%M:%S"), "flag": 0})
+    if not isinstance(data, list):
+        raise CheckError("WB Statistics вернул ответ не в виде списка продаж")
+    if len(data) >= 80000:
+        raise CheckError("Отчёт продаж WB достиг лимита строк; нужен постраничный сбор")
+    totals = defaultdict(float)
+    for sale in data:
+        if str(sale.get("saleID") or "").startswith("S"):
+            article = norm(sale.get("supplierArticle"))
+            if article:
+                totals[article] += 1
+    return {art: count / days for art, count in totals.items()}
+
+
+def stock_issues(ms, wb1, wb2, speed1, speed2):
+    issues = []
+    for art, ms_qty in ms.items():
+        a, b = wb1.get(art, 0), wb2.get(art, 0)
+        total = a + b
+        speed = speed1.get(art, 0) + speed2.get(art, 0)
+        target = math.ceil(7 * speed)
+        if total > ms_qty:
+            issues.append(f"{art}: превышение МСК — WB {total:g} (К1 {a:g}, К2 {b:g}), МСК {ms_qty:g}")
+        if speed > 0 and total < target:
+            add = min(max(0, target - total), max(0, ms_qty - total))
+            issues.append(f"{art}: запас {total/speed:.1f} дн.; нужно {target:g}, можно добавить {add:g} из МСК")
+    return issues
+
+
+def new_issues(ms, cards1, cards2, wb1, wb2):
+    known1 = {norm(c.get("vendorCode")) for c in cards1}
+    known2 = {norm(c.get("vendorCode")) for c in cards2}
+    issues = []
+    for art, qty in ms.items():
+        if qty <= 0:
+            continue
+        missing = [name for name, known, wb in (("К1", known1, wb1), ("К2", known2, wb2))
+                   if art not in known or wb.get(art, 0) <= 0]
+        if missing:
+            issues.append(f"{art}: МСК {qty:g}, WB К1 {wb1.get(art, 0):g}, К2 {wb2.get(art, 0):g}; проверить {', '.join(missing)}")
+    return issues
+
+
+def card_issues(cards, cabinet, required_by_subject):
+    issues = []
+    for card in cards:
+        art = norm(card.get("vendorCode")) or str(card.get("nmID") or "без артикула")
+        missing = []
+        for field, label in (("vendorCode", "артикул продавца"), ("title", "название"),
+                             ("description", "описание"), ("photos", "фото"), ("sizes", "размеры/баркоды")):
+            if not card.get(field):
+                missing.append(label)
+        if card.get("sizes") and not any(s.get("skus") for s in card["sizes"]):
+            missing.append("баркод")
+        dimensions = card.get("dimensions") or {}
+        for key, label in (("length", "длина"), ("width", "ширина"),
+                           ("height", "высота"), ("weightBrutto", "вес упаковки")):
+            if float(dimensions.get(key) or 0) <= 0:
+                missing.append(label)
+        if not card.get("tnved"):
+            missing.append("ТН ВЭД")
+        subject = card.get("subjectID")
+        if not subject:
+            missing.append("ID предмета")
+        else:
+            filled = {c.get("id") for c in (card.get("characteristics") or []) if c.get("value")}
+            for required in required_by_subject[subject]:
+                if required["id"] not in filled:
+                    missing.append(str(required.get("name") or required["id"]))
+        if missing:
+            issues.append(f"{cabinet} {art}: " + ", ".join(missing))
+    return issues
+
+
+def get_required_characteristics(token, cards):
+    result = {}
+    for subject in {c.get("subjectID") for c in cards if c.get("subjectID")}:
+        data = api("GET", f"{WB_CONTENT}/content/v2/object/charcs/{subject}", token)
+        if data.get("error") or not isinstance(data.get("data"), list):
+            raise CheckError(f"Не удалось загрузить обязательные поля предмета {subject}")
+        result[subject] = [c for c in data["data"] if c.get("required")]
+    return result
+
+
+def snapshot(with_sales=False):
+    required_tokens("MS_TOKEN", "WB_TOKEN_1", "WB_TOKEN_2")
+    ms = load_ms_stocks_dict()
+    if not ms:
+        raise CheckError("На складе МСК нет товаров с положительным остатком; проверка не выполнена")
+    cards1, wb1 = collect_cabinet(WB_TOKEN_1)
+    cards2, wb2 = collect_cabinet(WB_TOKEN_2)
+    speeds = (sales_speed(WB_TOKEN_1), sales_speed(WB_TOKEN_2)) if with_sales else ({}, {})
+    return ms, cards1, cards2, wb1, wb2, *speeds
+
+
+async def send_issues(message, title, issues):
+    if not issues:
+        await message.answer("✅ " + title + ": отклонений не найдено")
         return
-    ms_stocks = load_ms_stocks_dict()
-    current_articles = list(ms_stocks.keys())
-    
-    wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, current_articles, get_wb_warehouse_ids(WB_TOKEN_1)[0] if get_wb_warehouse_ids(WB_TOKEN_1) else None)
-    wb_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, current_articles, get_wb_warehouse_ids(WB_TOKEN_2)[0] if get_wb_warehouse_ids(WB_TOKEN_2) else None)
-    
-    report_lines = ["📋 **⏰ АВТО-ОТЧЕТ: КОНТРОЛЬ ОВЕРБУКИНГА (МСК):**\n"]
-    alert_triggered = False
-    
-    for art, ms_stock in ms_stocks.items():
-        total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
-        if total_wb > ms_stock:
-            report_lines.append(f"🚨 **ОВЕРБУКИНГ! `{art}`** | WB: {total_wb} шт. | Склад МСК: {ms_stock} шт.")
-            alert_triggered = True
-    if alert_triggered:
-        await bot.send_message(MY_CHAT_ID, "\n".join(report_lines), parse_mode="Markdown")
+    lines = [f"⚠️ {title} — найдено {len(issues)}:"] + ["• " + item for item in issues]
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3500:
+            await message.answer(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        await message.answer(chunk)
+
+
+async def run_check(message, kind):
+    status = await message.answer("Проверяю данные МойСклад и двух кабинетов WB…")
+    try:
+        if kind == "аудит":
+            required_tokens("WB_TOKEN_1", "WB_TOKEN_2")
+            issues = []
+            for name, token in (("К1", WB_TOKEN_1), ("К2", WB_TOKEN_2)):
+                cards = await asyncio.to_thread(get_real_wb_cards_and_scores, token)
+                if not cards:
+                    raise CheckError(f"Кабинет {name} вернул 0 карточек; аудит не завершён")
+                required = await asyncio.to_thread(get_required_characteristics, token, cards)
+                issues.extend(card_issues(cards, name, required))
+        else:
+            ms, c1, c2, w1, w2, s1, s2 = await asyncio.to_thread(snapshot, kind == "остатки")
+            if kind == "остатки":
+                issues = stock_issues(ms, w1, w2, s1, s2)
+            else:
+                issues = new_issues(ms, c1, c2, w1, w2)
+        await status.delete()
+        await send_issues(message, kind.capitalize(), issues)
+    except (CheckError, ValueError, TypeError) as exc:
+        await status.edit_text(f"❌ Проверка «{kind}» не выполнена: {exc}")
+
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
-    await message.answer(
-        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Полная автоматическая синхронизация 'Своего склада' WB и склада МСК по артикулам завершена!\n\n"
-        "• Напишите **остатки** — проверка дефицита и лимитов на 7 дней по ходовой витрине.\n"
-        "• Напишите **новинки** — независимый радар позиций, которые есть на МСК (как 86-Zont-blue), но забыты или обнулены на WB.\n"
-        "• Напишите **аудит** — жесткий комплаенс-контроль логистики (габариты, вес) и ТН ВЭД."
-    )
+    await message.answer("VESCHI AI: отправьте «остатки», «новинки» или «аудит».")
 
-@dp.message(lambda message: message.text and message.text.lower().strip() == "остатки")
-async def check_cross_stocks(message: types.Message):
-    status_msg = await message.answer("⚡ Проверяю FBS-остатки ходовых товаров и сверяю суммы двух кабинетов с МСК...")
-    
-    ms_stocks = load_ms_stocks_dict()
-    current_articles = list(ms_stocks.keys())
-    
-    warehouse_ids_1 = get_wb_warehouse_ids(WB_TOKEN_1)
-    wh_id_1 = warehouse_ids_1[0] if warehouse_ids_1 else None
-    
-    all_wb_cards = get_real_wb_cards_and_scores(WB_TOKEN_1)
-    sku_to_art_map = {}
-    barcodes_to_check = []
-    
-    for card in all_wb_cards:
-        art = str(card.get("vendorCode", "")).lower().strip()
-        sizes = card.get("sizes", [])
-        for size in sizes:
-            for sku in size.get("skus", []):
-                sku_str = str(sku).strip()
-                if sku_str:
-                    sku_to_art_map[sku_str] = art
-                    if art in ms_stocks:
-                        barcodes_to_check.append(sku_str)
-                        
-    wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, barcodes_to_check, wh_id_1)
-    wb_stocks_2 = {} # Инициализация для второго кабинета при необходимости
-    
-    report_lines = ["📋 **АНАЛИТИКА ТЕКУЩИХ FBS-ОСТАТКОВ И ДЕФИЦИТА (СКЛАД МСК):**\n"]
-    issues_found = 0
-    
-    for art, ms_stock in ms_stocks.items():
-        total_wb = sum(wb_stocks_1.get(sku, 0) for sku, a in sku_to_art_map.items() if a == art)
-        
-        if total_wb > 0:
-            sales_speed = get_wb_sales_speed(art)
-            days_left = total_wb / sales_speed if sales_speed > 0 else 0
-            
-            if total_wb > ms_stock:
-                report_lines.append(f"🚨 **ОВЕРБУКИНГ! Арт: `{art}`**\n• На WB суммарно: {total_wb} шт. | На складе МСК: {ms_stock} шт.\n")
-                issues_found += 1
-            elif days_left < 7 and ms_stock > total_wb:
-                required_stock = int((7 - days_left) * sales_speed)
-                safe_add = min(required_stock, ms_stock - total_wb)
-                if safe_add > 0:
-                    report_lines.append(f"⚠️ **ДЕФИЦИТ НА 7 ДНЕЙ! Арт: `{art}`**\n• Хватит всего на **{round(days_left, 1)} дн.** | На МСК свободно: {ms_stock} шт. | Рекомендация: Догрузите **+{safe_add} шт.**\n")
-                    issues_found += 1
 
-    await status_msg.delete()
-    if issues_found == 0:
-        await message.reply("✅ **Все ходовые товары в идеальном балансе!** Остатков на складе МСК хватает минимум на 7 дней продаж.", parse_mode="Markdown")
-    else:
-        await message.reply("\n".join(report_lines[:15]), parse_mode="Markdown")
+@dp.message(lambda message: message.text and message.text.strip().casefold() in {"остатки", "новинки", "аудит"})
+async def check_command(message: types.Message):
+    await run_check(message, message.text.strip().casefold())
 
-@dp.message(lambda message: message.text and message.text.lower().strip() == "новинки")
-async def check_new_products_radar(message: types.Message):
-    status_msg = await message.answer("🔍 Радар независимого Zero-API контроля запущен. Сверяю МСК напрямую со сквозными списками vendorCode маркетплейса...")
-    
-    ms_stocks = load_ms_stocks_dict()
-    if not ms_stocks:
-        await status_msg.delete()
-        return await message.reply("⚠️ **Ошибка связи с API Моего Склада!** База остатков МСК пуста. Проверка не выполнена.")
-        
-    all_wb_cards = get_real_wb_cards_and_scores(WB_TOKEN_1) + get_real_wb_cards_and_scores(WB_TOKEN_2)
-    wb_content_articles = set(str(c.get("vendorCode", "")).lower().strip() for c in all_wb_cards if c.get("vendorCode"))
-    
-    warehouse_ids_1 = get_wb_warehouse_ids(WB_TOKEN_1)
-    wh_id_1 = warehouse_ids_1[0] if warehouse_ids_1 else None
-    
-    sku_to_art_map = {}
-    barcodes_to_check = []
-    for card in all_wb_cards:
-        art = str(card.get("vendorCode", "")).lower().strip()
-        sizes = card.get("sizes", [])
-        for size in sizes:
-            for sku in size.get("skus", []):
-                sku_str = str(sku).strip()
-                if sku_str:
-                    sku_to_art_map[sku_str] = art
-                    if art in ms_stocks:
-                        barcodes_to_check.append(sku_str)
-                        
-    wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, barcodes_to_check, wh_id_1)
-    
-    report_lines = ["🔥 **РАДАР НОВИНОК: ЕСТЬ НА СКЛАДЕ МСК, НО ОБНУЛЕНЫ ИЛИ ОТСУТСТВУЮТ НА WB:**\n"]
-    new_detected = 0
-    
-    for art, ms_stock in ms_stocks.items():
-        total_wb_stock = sum(wb_stocks_1.get(sku, 0) for sku, a in sku_to_art_map.items() if a == art)
-        
-        if ms_stock > 0 and (total_wb_stock == 0 or art not in wb_content_articles):
-            report_lines.append(
-                f"✨ **ПОСТАВЬ НА ОСТАТОК НОВЫЙ ТОВАР! Арт: `{art.upper()}`**\n"
-                f"• На складе МСК в наличии: **{ms_stock} шт.**\n"
-                f"• На витрине маркетплейса: ❌ **Остаток не выставлен (0 шт.) или карточка в черновиках**\n"
-                f"• **Задание команде:** Срочно пропишите остатки по FBS и проверьте статус карточки в ЛК WB! 🚀\n"
-            )
-            new_detected += 1
-            
-    await status_msg.delete()
-    if new_detected == 0:
-        await message.reply("✅ **Новых скрытых позиций не обнаружено!** Все товары с остатками на МСК успешно выгружены на Wildberries.", parse_mode="Markdown")
-    else:
-        await message.reply("\n".join(report_lines[:15]), parse_mode="Markdown")
 
-@dp.message(lambda message: message.text and message.text.lower().strip() == "аудит")
-async def check_tnved_and_rating_audit(message: types.Message):
-    status_msg = await message.answer("📋 Юридический комплаенс-контроль активной матрицы товаров со склада МСК...")
-    
-    ms_stocks = load_ms_stocks_dict()
-    current_articles = list(ms_stocks.keys())
-    
-    cabinets = [("Кабинет №1", WB_TOKEN_1), ("Кабинет №2", WB_TOKEN_2)]
-    report_lines = ["📋 **🚨 ОТЧЕТ: КАРТОЧКИ С ОТСУТСТВИЕМ ОБЯЗАТЕЛЬНЫХ ДАННЫХ:**\n"]
-    issues_found = 0
-    
-    for cab_name, token in cabinets:
-        if not token: continue
-        cards = get_real_wb_cards_and_scores(token)
-        for card in cards:
-            art = str(card.get("vendorCode", "—")).strip()
-            art_l = art.lower().strip()
-            object_name = str(card.get("object", "")).lower()
-            
-            if art_l not in current_articles:
-                continue
-                
-            characteristics = card.get("characteristics", [])
-            description = str(card.get("description", "")).strip()
-            tnved_wb = str(card.get("tnved", "")).strip()
-            
-            weight, ch_width, ch_height, ch_length = 0, 0, 0, 0
-            has_certificate = False
-            
-            for char in characteristics:
-                char_name = str(char.get("name", "")).lower()
-                char_val = char.get("value", [])
-                val_str = str(char_val).strip() if char_val else ""
-                if "вес" in char_name:
-                    try: weight = float(val_str)
-                    except: pass
-                elif "ширин" in char_name and "упаков" in char_name:
-                    try: ch_width = int(float(val_str))
-                    except: pass
-                elif "высот" in char_name and "упаков" in char_name:
-                    try: ch_height = int(float(val_str))
-                    except: pass
-                elif "длин" in char_name and "упаков" in char_name:
-                    try: ch_length = int(float(val_str))
-                    except: pass
-                elif "сертификат" in char_name or "декларац" in char_name or "номер" in char_name:
-                    if val_str and val_str != "—" and val_str != "0": has_certificate = True
+async def run_scheduled_stock_check():
+    if not MY_CHAT_ID:
+        return
+    try:
+        ms, _, _, w1, w2, s1, s2 = await asyncio.to_thread(snapshot, True)
+        issues = stock_issues(ms, w1, w2, s1, s2)
+        if issues:
+            await send_issues(_BotMessage(MY_CHAT_ID), "Автопроверка остатков", issues)
+    except CheckError as exc:
+        await _BotMessage(MY_CHAT_ID).answer(f"❌ Автопроверка не выполнена: {exc}")
 
-            ref_row = None
-            for key in REF_DATA:
-                k_l = key.lower()
-                is_match = (k_l in object_name or k_l in art_l or
-                            ("сумк" in k_l and ("bag" in art_l or "sumka" in art_l)) or
-                            ("рюкзак" in k_l and ("bag" in art_l or "ryukzak" in art_l)) or
-                            ("шарф" in k_l and ("scarf" in art_l or "sharf" in art_l)) or
-                            ("зонт" in k_l and ("umbrella" in art_l or "zont" in art_l)))
-                if is_match:
-                    ref_row = REF_DATA[key]
-                    break
 
-            missing_fields = []
-            if not ch_width or not ch_height or not ch_length:
-            missing_fields = []
-            
-            if not ch_width or not ch_height or not ch_length:
-                missing_fields.append("❌ ГАБАРИТЫ УПАКОВКИ (Обнулены длина/ширина/высота!)")
-            if not weight:
-                missing_fields.append("❌ ВЕС ТОВАРА (Не указана масса)")
-            if not description or len(description) < 100:
-                missing_fields.append("❌ ОПИСАНИЕ (Пустой текст карточки)")
-                
-            if ref_row:
-                ref_tnved = str(ref_row.get("ТНВЭД", "")).strip()
-                ref_decl = str(ref_row.get("Номер декларации", "—")).strip()
-                if not tnved_wb or not tnved_wb.startswith(ref_tnved[:4]):
-                    missing_fields.append(f"🛑 КОД ТН ВЭД (Должен быть: `{ref_tnved}`)")
-                if not has_certificate:
-                    missing_fields.append(f"📜 СВЯЗЬ С ДЕКЛАРАЦИЕЙ (Не привязан номер `{ref_decl}`)")
+class _BotMessage:
+    def __init__(self, chat_id):
+        self.chat_id = chat_id
 
-            if missing_fields:
-                card_issue_text = f"📦 **[{cab_name}] Артикул: `{art}`**\n"
-                for field in missing_fields: 
-                    card_issue_text += f"• {field}\n"
-                report_lines.append(card_issue_text)
-                issues_found += 1
-            if issues_found >= 10: break
-        if issues_found >= 10: break
-        
-    await status_msg.delete()
-    if issues_found == 0:
-        await message.answer("✅ **Логистический и юридический аудит пройден на 10/10!** Все обязательные поля заполнены.", parse_mode="Markdown")
-    else:
-        await message.answer("\n".join(report_lines[:10]), parse_mode="Markdown")
+    async def answer(self, text):
+        await bot.send_message(self.chat_id, text)
+
 
 async def main():
-    session = AiohttpSession()
     global bot
-    bot = Bot(token=BOT_TOKEN, session=session)
+    required_tokens("BOT_TOKEN")
+    bot = Bot(token=BOT_TOKEN)
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    
-    # Настраиваем авто-отчет дважды в день по МСК
-    scheduler.add_job(run_scheduled_stock_check, CronTrigger(hour="9,15", minute="0", timezone="Europe/Moscow"))
+    scheduler.add_job(run_scheduled_stock_check, "cron", hour="9,15", minute=0)
     scheduler.start()
-    
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, handle_signals=False)
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot, handle_signals=False)
+    finally:
+        scheduler.shutdown(wait=False)
+        await bot.session.close()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     asyncio.run(main())
