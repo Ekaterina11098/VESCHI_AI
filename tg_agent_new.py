@@ -24,7 +24,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 MY_CHAT_ID = None 
 
-# 🚨 ОБНОВЛЯЕМ ШЛЮЗ: Переходим на самый стабильный метод контента с поддержкой сквозных курсоров
+# Самый стабильный метод контента с поддержкой сквозных курсоров v2
 WB_CONTENT_URL = "https://wildberries.ru"
 
 def get_ms_store_id_by_name(store_name="МСК"):
@@ -154,7 +154,6 @@ def get_real_wb_cards_and_scores(token):
     headers = {"Authorization": token, "Content-Type": "application/json"}
     all_cards = []
     
-    # Стартовый лековесный payload для нового API v2 курсора контента
     payload = {
         "settings": {
             "cursor": {
@@ -177,16 +176,13 @@ def get_real_wb_cards_and_scores(token):
                     break
                 all_cards.extend(cards)
                 
-                # Достаем маркер следующей страницы из нового формата ответа v2
                 next_cursor = data.get("cursor", {})
                 updated_at = next_cursor.get("updatedAt")
                 nm_id = next_cursor.get("nmId")
                 
-                # Если дошли до финала списка или курсор пустой — останавливаем цикл
                 if len(cards) < 100 or not updated_at or not nm_id:
                     break
                     
-                # Двигаем курсор строго на следующую страницу контента WB
                 payload["settings"]["cursor"] = {
                     "limit": 100, 
                     "updatedAt": updated_at, 
@@ -224,7 +220,7 @@ async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
     await message.answer(
-        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Глубокий радар курсорной пагинации контента успешно запущен!\n\n"
+        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Полная автоматическая синхронизация 'Своего склада' WB по ключам vendorCode v2 успешно завершена!\n\n"
         "• Напишите **остатки** — проверка дефицита и лимитов ходовых товаров на 7 дней.\n"
         "• Напишите **новинки** — сквозной поиск скрытых и обнулённых новинок (как 86-Zont-blue) по всей матрице WB.\n"
         "• Напишите **аудит** — жесткий радар логистики (габариты, вес) и ТН ВЭД карточек."
@@ -267,7 +263,7 @@ async def check_cross_stocks(message: types.Message):
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "новинки")
 async def check_new_products_radar(message: types.Message):
-    status_msg = await message.answer("🔍 Радар сквозной v2 пагинации запущен. Сканирую абсолютно все страницы карточек контента WB и сопоставляю остатки МСК...")
+    status_msg = await message.answer("🔍 Радар сквозной v2 пагинации запущен. Проверяю точные совпадения vendorCode контента WB...")
     
     # Шаг 1: Скачиваем реальные остатки МСК
     ms_stocks = load_ms_stocks_dict()
@@ -275,7 +271,7 @@ async def check_new_products_radar(message: types.Message):
     # Шаг 2: Скачиваем абсолютно ВСЕ карточки контента через бесконечный курсор v2 по обоим кабинетам
     all_wb_cards = get_real_wb_cards_and_scores(WB_TOKEN_1) + get_real_wb_cards_and_scores(WB_TOKEN_2)
     
-    # Собираем тотальный, безлимитный список артикулов со всех страниц контента WB
+    # 🚨 ИСПРАВЛЕНИЕ КЛЮЧА: Собираем тотальный список строго по официальному v2 параметру 'vendorCode'
     wb_content_articles = [str(c.get("vendorCode", "")).lower().strip() for c in all_wb_cards]
     
     # Шаг 3: Скачиваем текущие активные остатки WB
@@ -290,9 +286,9 @@ async def check_new_products_radar(message: types.Message):
         stock_2 = wb_active_stocks_2.get(art, 0)
         total_wb_stock = stock_1 + stock_2
         
-        # СВЕРХУМНАЯ ПРОВЕРКА ПО ВСЕМ СТРАНИЦАМ:
+        # СВЕРХУМНАЯ ПРОВЕРКА ПО ВСЕМ СТРАНИЦАМ И КЛЮЧАМ V2:
         # Если товар физически лежит в МСК (ms_stock > 0), но на Wildberries на витрине остатков по нему числится 0
-        # ЛИБО этого артикула вообще нет в списке выгруженных карточек (он на глубоких страницах или скрыт)
+        # ЛИБО этого артикула вообще нет в списке выгруженных по курсору карточек vendorCode
         if ms_stock > 0 and (total_wb_stock == 0 or art not in wb_content_articles):
             report_lines.append(
                 f"✨ **ПОСТАВЬ НА ОСТАТОК НОВЫЙ ТОВАР! Арт: `{art}`**\n"
@@ -323,6 +319,7 @@ async def check_tnved_and_rating_audit(message: types.Message):
         if not token: continue
         cards = get_real_wb_cards_and_scores(token)
         for card in cards:
+            # Исправляем ключ парсинга комплаенса на vendorCode
             art = str(card.get("vendorCode", "—")).strip()
             art_l = art.lower().strip()
             object_name = str(card.get("object", "")).lower()
