@@ -1,7 +1,7 @@
 import streamlit as st
 import asyncio
 import aiohttp
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 from tg_agent_new import dp, BOT_TOKEN
 
@@ -11,16 +11,14 @@ st.title("🤖 Фоновый ИИ-сервер Telegram-агента")
 st.success("Этот модуль круглосуточно держит вашего бота-супервайзера в сети сквозь любые VPN!")
 
 async def start_cloud_polling():
-    """Сверхлегкий облачный веб-пуллинг с корректной инициализацией сессии для aiogram"""
+    """Сверхлегкий облачный веб-пуллинг без конфликтов сигналов Linux"""
     try:
-        # Корректно инициализируем облачную сессию aiogram
         aiogram_session = AiohttpSession()
         bot = Bot(token=BOT_TOKEN, session=aiogram_session)
         
         await bot.delete_webhook(drop_pending_updates=True)
         st.info("⚡ Безопасное соединение с серверами Telegram установлено успешно...")
         
-        # Запускаем опрос без перехвата системных сигналов
         await dp.start_polling(bot, handle_signals=False)
     except Exception as e:
         st.error(f"Ошибка внутри сессии: {e}")
