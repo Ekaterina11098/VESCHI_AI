@@ -1,69 +1,57 @@
 import os
-import time
-from pathlib import Path
-from dotenv import load_dotenv
+import json
 from openai import OpenAI
+from dotenv import load_dotenv
 
 load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=api_key) if api_key else None
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("Не найден OPENAI_API_KEY. Проверьте файл .env")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-BASE_DIR = Path(__file__).resolve().parent.parent
-PROMPT_PATH = BASE_DIR / "prompts" / "system_prompt.md"
+# Задаем универсальный облачный путь к файлу промпта, лежащему в той же папке
+PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt.md")
 
 def load_system_prompt():
-    if not PROMPT_PATH.exists():
+    """Читает текст системного промпта из файла"""
+    if not os.path.exists(PROMPT_PATH):
         raise FileNotFoundError(f"Не найден файл промта: {PROMPT_PATH}")
-    return PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt.md")
-
+    with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+        return f.read()
 
 def generate_draft(feedback):
-    """
-    Делает два раздельных запроса к ИИ по очереди,
-    чтобы гарантировать два абсолютно разных варианта текста.
-    """
-    system_prompt = load_system_prompt()
-    product = feedback.get("productDetails") or {}
+    """Генерирует два варианта ответа на отзыв через OpenAI"""
+    if not client:
+        return {
+            "variant1": "Ошибка: Не настроен OPENAI_API_KEY в Secrets.",
+            "variant2": "Ошибка: Не настроен OPENAI_API_KEY в Secrets."
+        }
+        
+    try:
+        system_prompt = load_system_prompt()
+    except Exception as e:
+        return {"variant1": f"Ошибка промпта: {e}", "variant2": f"Ошибка промпта: {e}"}
 
-    buyer_name = feedback.get("userName") or "не указано"
-    rating = feedback.get("productValuation") or ""
-    text = feedback.get("text") or ""
-    pros = feedback.get("pros") or ""
-    cons = feedback.get("cons") or ""
-    nm_id = product.get("nmId") or ""
-    product_name = product.get("productName") or ""
-
-    review_data = f"Имя: {buyer_name}\nТовар: {product_name}\nОценка: {rating}/5\nДостоинства: {pros}\nНедостатки: {cons}\nОтзыв: {text}"
-
-    # --- ЗАПРОС №1 (Обычный вариант) ---
-    response_1 = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.8,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Напиши вежливый ответ на этот отзыв:\n{review_data}"}
-        ]
-    )
-    variant_1 = response_1.choices[0].message.content.strip()
-
-    # Небольшая пауза для сброса кэша сети
-    time.sleep(0.5)
-
-    # --- ЗАПРОС №2 (Альтернативный вариант) ---
-    # Передаем ИИ первый ответ и требуем написать совершенно иначе!
-    instruction_2 = f"Напиши ответ на этот отзыв:\n{review_data}\n\n🚨 ВАЖНО: Напиши этот ответ совершенно другими словами, синонимами и измени структуру предложений! Твой ответ должен визуально сильно отличаться от этого варианта:\n{variant_1}"
+    user_content = f"Покупатель: {feedback.get('userName', 'Покупатель')}\nОценка: {feedback.get('productValuation', 5)} звезд\nОтзыв: {feedback.get('text', '')}"
     
-    response_2 = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.95, # Максимальное творчество
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": instruction_2}
-        ]
-    )
-    variant_2 = response_2.choices[0].message.content.strip()
-    
-    return [variant_1, variant_2]
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            temperature=0.7
+        )
+        text = response.choices[0].message.content.strip()
+        
+        # Разделяем два сгенерированных варианта по ключевому слову или строке
+        if "Вариант 2" in text:
+            parts = text.split("Вариант 2")
+            v1 = parts[0].replace("Вариант 1", "").strip(":\n ")
+            v2 = parts[1].strip(":\n ")
+        else:
+            v1 = text
+            v2 = text + " (Повтор: ИИ сгенерировал один вариант)"
+            
+        return {"variant1": v1, "variant2": v2}
+    except Exception as e:
+        return {"variant1": f"Ошибка ИИ: {e}", "variant2": f"Ошибка ИИ: {e}"}
