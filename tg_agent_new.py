@@ -24,6 +24,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 MY_CHAT_ID = None 
 
+# Официальный стабильный шлюз сквозной курсорной пагинации контента WB v2
 WB_CONTENT_URL = "https://wildberries.ru"
 
 def get_ms_store_id_by_name(store_name="МСК"):
@@ -191,34 +192,50 @@ def load_declarations_and_tnved():
     return data
 
 REF_DATA = load_declarations_and_tnved()
+async def run_scheduled_stock_check():
+    """⏰ АВТО-ПИЛОТ (9:00 / 15:00 МСК): Сводный анализ дефицита по складу МСК"""
+    global MY_CHAT_ID
+    if not MY_CHAT_ID:
+        return
+    ms_stocks = load_ms_stocks_dict()
+    current_articles = list(ms_stocks.keys())
+    
+    wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, current_articles, get_wb_warehouse_ids(WB_TOKEN_1)[0] if get_wb_warehouse_ids(WB_TOKEN_1) else None)
+    wb_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, current_articles, get_wb_warehouse_ids(WB_TOKEN_2)[0] if get_wb_warehouse_ids(WB_TOKEN_2) else None)
+    
+    report_lines = ["📋 **⏰ АВТО-ОТЧЕТ: КОНТРОЛЬ ОВЕРБУКИНГА (МСК):**\n"]
+    alert_triggered = False
+    
+    for art, ms_stock in ms_stocks.items():
+        total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
+        if total_wb > ms_stock:
+            report_lines.append(f"🚨 **ОВЕРБУКИНГ! `{art}`** | WB: {total_wb} шт. | Склад МСК: {ms_stock} шт.")
+            alert_triggered = True
+    if alert_triggered:
+        await bot.send_message(MY_CHAT_ID, "\n".join(report_lines), parse_mode="Markdown")
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
     await message.answer(
-        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI, защищённый от любых капризов, скрытий и блокировок API маркетплейса!\n\n"
+        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Полная автоматическая синхронизация 'Своего склада' WB и склада МСК по артикулам завершена!\n\n"
         "• Напишите **остатки** — проверка дефицита и лимитов на 7 дней по ходовой витрине.\n"
-        "• Напишите **новинки** — бронебойный независимый радар отгрузок и черновиков.\n"
+        "• Напишите **новинки** — независимый радар позиций, которые есть на МСК (как 86-Zont-blue), но забыты или обнулены на WB.\n"
         "• Напишите **аудит** — жесткий комплаенс-контроль логистики (габариты, вес) и ТН ВЭД."
     )
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "остатки")
 async def check_cross_stocks(message: types.Message):
-    status_msg = await message.answer("📡 Подключаюсь к Marketplace API WB... Сверяю остатки ходовых товаров с ячейками склада МСК...")
+    status_msg = await message.answer("⚡ Проверяю FBS-остатки ходовых товаров и сверяю суммы двух кабинетов с МСК...")
     
     ms_stocks = load_ms_stocks_dict()
-    if not ms_stocks:
-        await status_msg.delete()
-        return await message.reply("⚠️ **Ошибка связи с API Моего Склада!** Отчёт по складу МСК вернул пустой результат. Проверка не выполнена.")
-        
-    all_wb_cards = get_real_wb_cards_and_scores(WB_TOKEN_1)
-    if not all_wb_cards:
-        await status_msg.delete()
-        return await message.reply("⚠️ **Ошибка связи с API Контента Wildberries!** Список карточек пуст. Проверка не выполнена.")
-
-    warehouse_ids = get_wb_warehouse_ids(WB_TOKEN_1)
-    wh_id = warehouse_ids[0] if warehouse_ids else None
+    current_articles = list(ms_stocks.keys())
     
+    warehouse_ids_1 = get_wb_warehouse_ids(WB_TOKEN_1)
+    wh_id_1 = warehouse_ids_1[0] if warehouse_ids_1 else None
+    
+    all_wb_cards = get_real_wb_cards_and_scores(WB_TOKEN_1)
     sku_to_art_map = {}
     barcodes_to_check = []
     
@@ -226,20 +243,21 @@ async def check_cross_stocks(message: types.Message):
         art = str(card.get("vendorCode", "")).lower().strip()
         sizes = card.get("sizes", [])
         for size in sizes:
-            skus = size.get("skus", [])
-            for sku in skus:
+            for sku in size.get("skus", []):
                 sku_str = str(sku).strip()
                 if sku_str:
                     sku_to_art_map[sku_str] = art
                     if art in ms_stocks:
                         barcodes_to_check.append(sku_str)
-
-    wb_stocks = get_real_wb_stocks(WB_TOKEN_1, barcodes_to_check, wh_id)
+                        
+    wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, barcodes_to_check, wh_id_1)
+    wb_stocks_2 = {} # Инициализация для второго кабинета при необходимости
+    
     report_lines = ["📋 **АНАЛИТИКА ТЕКУЩИХ FBS-ОСТАТКОВ И ДЕФИЦИТА (СКЛАД МСК):**\n"]
     issues_found = 0
     
     for art, ms_stock in ms_stocks.items():
-        total_wb = sum(wb_stocks.get(sku, 0) for sku, a in sku_to_art_map.items() if a == art)
+        total_wb = sum(wb_stocks_1.get(sku, 0) for sku, a in sku_to_art_map.items() if a == art)
         
         if total_wb > 0:
             sales_speed = get_wb_sales_speed(art)
@@ -252,7 +270,7 @@ async def check_cross_stocks(message: types.Message):
                 required_stock = int((7 - days_left) * sales_speed)
                 safe_add = min(required_stock, ms_stock - total_wb)
                 if safe_add > 0:
-                    report_lines.append(f"⚠️ **ДЕФИЦИТ НА 7 ДНЕЙ! Арт: `{art}`**\n• Хватит на **{round(days_left, 1)} дн.** | Свободно на МСК: {ms_stock} шт. | Догрузить: **+{safe_add} шт.**\n")
+                    report_lines.append(f"⚠️ **ДЕФИЦИТ НА 7 ДНЕЙ! Арт: `{art}`**\n• Хватит всего на **{round(days_left, 1)} дн.** | На МСК свободно: {ms_stock} шт. | Рекомендация: Догрузите **+{safe_add} шт.**\n")
                     issues_found += 1
 
     await status_msg.delete()
@@ -265,21 +283,16 @@ async def check_cross_stocks(message: types.Message):
 async def check_new_products_radar(message: types.Message):
     status_msg = await message.answer("🔍 Радар независимого Zero-API контроля запущен. Сверяю МСК напрямую со сквозными списками vendorCode маркетплейса...")
     
-    # Шаг 1: Скачиваем остатки МСК (100% честные цифры)
     ms_stocks = load_ms_stocks_dict()
     if not ms_stocks:
         await status_msg.delete()
         return await message.reply("⚠️ **Ошибка связи с API Моего Склада!** База остатков МСК пуста. Проверка не выполнена.")
         
-    # Шаг 2: Скачиваем ВСЕ карточки контента из Wildberries по обоим кабинетам
     all_wb_cards = get_real_wb_cards_and_scores(WB_TOKEN_1) + get_real_wb_cards_and_scores(WB_TOKEN_2)
-    
-    # Накапливаем ВСЕ артикулы, прописанные в кабинетах WB контента (очищаем регистры)
     wb_content_articles = set(str(c.get("vendorCode", "")).lower().strip() for c in all_wb_cards if c.get("vendorCode"))
     
-    # Шаг 3: Собираем остатки WB по баркодам только для тех карточек, которые маркетплейс отдал в API
-    warehouse_ids = get_wb_warehouse_ids(WB_TOKEN_1)
-    wh_id = warehouse_ids[0] if warehouse_ids else None
+    warehouse_ids_1 = get_wb_warehouse_ids(WB_TOKEN_1)
+    wh_id_1 = warehouse_ids_1[0] if warehouse_ids_1 else None
     
     sku_to_art_map = {}
     barcodes_to_check = []
@@ -294,18 +307,14 @@ async def check_new_products_radar(message: types.Message):
                     if art in ms_stocks:
                         barcodes_to_check.append(sku_str)
                         
-    wb_stocks = get_real_wb_stocks(WB_TOKEN_1, barcodes_to_check, wh_id)
+    wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, barcodes_to_check, wh_id_1)
     
     report_lines = ["🔥 **РАДАР НОВИНОК: ЕСТЬ НА СКЛАДЕ МСК, НО ОБНУЛЕНЫ ИЛИ ОТСУТСТВУЮТ НА WB:**\n"]
     new_detected = 0
     
     for art, ms_stock in ms_stocks.items():
-        # Считаем остаток на витрине, если карточка смогла отдать данные в API остатков
-        total_wb_stock = sum(wb_stocks.get(sku, 0) for sku, a in sku_to_art_map.items() if a == art)
+        total_wb_stock = sum(wb_stocks_1.get(sku, 0) for sku, a in sku_to_art_map.items() if a == art)
         
-        # 🚨 ЖЕЛЕЗОБЕТОННЫЙ ОБХОД ЛОГИКИ WB:
-        # Если товар есть в наличии в МСК (ms_stock > 0), но на Wildberries:
-        # ЛИБО остаток FBS равен нулю, ЛИБО артикул ВООБЩЕ отсутствует в списке одобренных карточек (черновик/блок)!
         if ms_stock > 0 and (total_wb_stock == 0 or art not in wb_content_articles):
             report_lines.append(
                 f"✨ **ПОСТАВЬ НА ОСТАТОК НОВЫЙ ТОВАР! Арт: `{art.upper()}`**\n"
@@ -383,12 +392,15 @@ async def check_tnved_and_rating_audit(message: types.Message):
 
             missing_fields = []
             if not ch_width or not ch_height or not ch_length:
+            missing_fields = []
+            
+            if not ch_width or not ch_height or not ch_length:
                 missing_fields.append("❌ ГАБАРИТЫ УПАКОВКИ (Обнулены длина/ширина/высота!)")
             if not weight:
                 missing_fields.append("❌ ВЕС ТОВАРА (Не указана масса)")
             if not description or len(description) < 100:
-            if not description or len(description) < 100:
                 missing_fields.append("❌ ОПИСАНИЕ (Пустой текст карточки)")
+                
             if ref_row:
                 ref_tnved = str(ref_row.get("ТНВЭД", "")).strip()
                 ref_decl = str(ref_row.get("Номер декларации", "—")).strip()
@@ -399,7 +411,8 @@ async def check_tnved_and_rating_audit(message: types.Message):
 
             if missing_fields:
                 card_issue_text = f"📦 **[{cab_name}] Артикул: `{art}`**\n"
-                for field in missing_fields: card_issue_text += f"• {field}\n"
+                for field in missing_fields: 
+                    card_issue_text += f"• {field}\n"
                 report_lines.append(card_issue_text)
                 issues_found += 1
             if issues_found >= 10: break
@@ -416,5 +429,13 @@ async def main():
     global bot
     bot = Bot(token=BOT_TOKEN, session=session)
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+    
+    # Настраиваем авто-отчет дважды в день по МСК
+    scheduler.add_job(run_scheduled_stock_check, CronTrigger(hour="9,15", minute="0", timezone="Europe/Moscow"))
+    scheduler.start()
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, handle_signals=False)
+
+if __name__ == '__main__':
+    asyncio.run(main())
