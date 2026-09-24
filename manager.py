@@ -1,31 +1,11 @@
 import streamlit as st
-import json, os, requests, asyncio
-from threading import Thread
+import json, os, requests
 from datetime import datetime
 from wildberries import get_unanswered_feedbacks, post_review_reply
 from openai_client import generate_draft
 from validator import validate_answer
 
-# Импортируем нашего бота
-from tg_agent_new import main as run_tg_bot
-
 st.set_page_config(page_title="VESCHI AI", page_icon="👜", layout="wide")
-
-def start_bot_in_background():
-    """Запускает Telegram-бота в изолированном асинхронном цикле"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_tg_bot())
-
-# БЕЗОПАСНЫЙ ФОНОВЫЙ ПОТОК: Бот запускается на "соседнем процессоре" облака.
-# Он работает 24/7, не тормозит интерфейс сайта и мгновенно отвечает в Telegram!
-if "bot_thread_started" not in st.session_state:
-    try:
-        thread = Thread(target=start_bot_in_background, daemon=True)
-        thread.start()
-        st.session_state["bot_thread_started"] = True
-    except Exception as e:
-        pass
 
 if "benchmarks" not in st.session_state:
     st.session_state["benchmarks"] = []
