@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WB_TOKEN_1 = os.getenv("WB_TOKEN_1")
-WB_TOKEN_2 = os.getenv("WB_TOKEN_2_2")
+WB_TOKEN_2 = os.getenv("WB_TOKEN_2")
 MS_TOKEN = os.getenv("MOYSKLAD_API_TOKEN")
 MS_STORE_NAME = os.getenv("MOYSKLAD_STORE_NAME", "МСК")
 SALES_DAYS = int(os.getenv("SALES_DAYS", "28"))
