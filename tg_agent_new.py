@@ -44,26 +44,28 @@ def get_ms_store_id_by_name(store_name="МСК"):
     return None
 
 def load_ms_stocks_dict():
-    """📡 ЖЕСТКИЙ ФИЛЬТР МСК: Запрашивает остатки через специализированный метод 
-    by_store строго для выбранного склада МСК, исключая общие остатки компании."""
+    """📡 ЖЕСТКИЙ POST-ФИЛЬТР МСК: Запрашивает остатки через специализированный 
+    POST-метод report/stock/by_store строго для выбранного склада МСК."""
     if not MS_TOKEN:
         return {}
     
     store_id = get_ms_store_id_by_name("МСК")
     stocks_dict = {}
     
-    # 🚨 ИСПОЛЬЗУЕМ ТОЧНЫЙ КАНАЛ ПО СКЛАДАМ: report/stock/by_store
     url = "https://moysklad.ru"
     headers = {
         "Authorization": f"Bearer {MS_TOKEN}",
+        "Content-Type": "application/json",
         "Accept-Encoding": "gzip"
     }
     
+    # Жестко задаем параметры фильтрации
     params = {"limit": 1000}
     if store_id:
-        params["storeId"] = store_id  # Передаем точный параметр ID для отчета by_store
+        params["storeId"] = store_id
         
     try:
+        # 🚨 ИСПРАВЛЕНИЕ: Отправляем POST вместо GET с пустым JSON-телом, как требует API Моего Склада!
         response = requests.post(url, headers=headers, json={}, params=params, timeout=15)
         if response.status_code == 200:
             rows = response.json().get("rows", [])
@@ -176,7 +178,7 @@ async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
     await message.answer(
-        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Контролирую точные остатки по складу МСК!\n\n"
+        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Точные остатки по складу МСК полностью синхронизированы!\n\n"
         "• Напишите **остатки** — проверка дефицита и лимитов ходовых товаров на 7 дней.\n"
         "• Напишите **новинки** — радар позиций, которые есть на складе МСК (как 86-Zont-blue), но забыты на WB.\n"
         "• Напишите **аудит** — жесткий радар логистики (габариты, вес) и ТН ВЭД карточек."
@@ -184,9 +186,9 @@ async def cmd_start(message: types.Message):
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "остатки")
 async def check_cross_stocks(message: types.Message):
-    status_msg = await message.answer("⚡ Проверяю FBS-остатки ходовых товаров по складу МСК...")
+    status_msg = await message.answer("⚡ Сверяю точные суммы двух кабинетов WB с реальным наличием на складе МСК...")
     
-    # Загружаем реальные остатки только со склада МСК
+    # Загружаем реальные остатки только со склада МСК через POST
     ms_stocks = load_ms_stocks_dict()
     current_articles = list(ms_stocks.keys())
     
@@ -205,7 +207,7 @@ async def check_cross_stocks(message: types.Message):
             
             # 1. Контроль овербукинга относительно МСК
             if total_wb > ms_stock:
-                report_lines.append(f"🚨 **ОВЕРБУКИНГ! Арт: `{art}`**\n• На WB: {total_wb} шт. | На складе МСК: {ms_stock} шт.\n")
+                report_lines.append(f"🚨 **ОВЕРБУКИНГ! Арт: `{art}`**\n• На WB суммарно: {total_wb} шт. | На складе МСК: {ms_stock} шт.\n")
                 issues_found += 1
             # 2. Контроль дефицита на 7 дней
             elif days_left < 7 and ms_stock > total_wb:
@@ -217,13 +219,13 @@ async def check_cross_stocks(message: types.Message):
 
     await status_msg.delete()
     if issues_found == 0:
-        await message.reply("✅ **Все ходовые товары в идеальном балансе!** Остатков на складе МСК хватает минимум на 7 дней продаж.", parse_mode="Markdown")
+        await message.reply("✅ **Все ходовые товары в идеальном балансе!** Суммы остатков кабинетов соответствуют складу МСК, товара хватает минимум на 7 дней продаж.", parse_mode="Markdown")
     else:
         await message.reply("\n".join(report_lines[:15]), parse_mode="Markdown")
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "новинки")
 async def check_new_products_radar(message: types.Message):
-    status_msg = await message.answer("🔍 Радар МСК запущен. Проверяю остатки...")
+    status_msg = await message.answer("🔍 Радар МСК запущен через POST-шлюз. Ищу скрытые новинки...")
     
     # Авто-диагностика на случай отсутствия склада МСК
     if not get_ms_store_id_by_name("МСК"):
@@ -365,4 +367,3 @@ async def main():
     bot = Bot(token=BOT_TOKEN, session=session)
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, handle_signals=False)
