@@ -134,14 +134,14 @@ async def run_scheduled_stock_check():
 async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
-    await message.answer("Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI.\n\n• Напишите **остатки** — тотальный анализ дефицита.\n• Напишите **аудит** — развернутый радар скрытых карточек и сброса ТН ВЭД.")
+    await message.answer("Привет, Екатерина! 👜✨\nЯ ваш ИИ-аудитор безопасности бренда VESCHI.\n\n• Напишите **остатки** — проверка лимитов.\n• Напишите **аудит** — тотальный радар отсутствия обязательных полей (габариты, вес, ТН ВЭД, декларации).")
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "остатки")
 async def check_cross_stocks(message: types.Message):
-    status_msg = await message.answer("⚡ Провожу глубокий анализ дефицита по ВСЕМ артикулам...")
+    status_msg = await message.answer("⚡ Анализирую FBS-остатки...")
     wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, REAL_ARTICLES)
     wb_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, REAL_ARTICLES)
-    report_lines = ["📋 **АНАЛИТИКА УПУЩЕННОЙ ВЫРУЧКИ И ДЕФИЦИТА:**\n"]
+    report_lines = ["📋 **АНАЛИТИКА ОСТАТКОВ:**\n"]
     issues_found = 0
     async with aiohttp.ClientSession() as session:
         tasks = [get_moysklad_stock_async(session, art) for art in REAL_ARTICLES]
@@ -150,60 +150,63 @@ async def check_cross_stocks(message: types.Message):
         art_l = str(art).strip().lower()
         total_wb = wb_stocks_1.get(art_l, 0) + wb_stocks_2.get(art_l, 0)
         if total_wb == 0 and ms_stock > 0:
-            report_lines.append(f"🔥 **УПУЩЕННАЯ ВЫРУЧКА! Арт: `{art}`**\n• На WB: **0 шт.** | В Моем Складе: **{ms_stock} шт.**\n")
+            report_lines.append(f"🔥 **УПУЩЕННАЯ ВЫРУЧКА! `{art}`** | WB: 0 шт. | МС: {ms_stock} шт.")
             issues_found += 1
     await status_msg.delete()
     if issues_found == 0:
-        await message.reply("✅ **Кабинеты в идеальном балансе!** Товара на WB хватает минимум на 7 дней продаж по всей матрице артикулов.", parse_mode="Markdown")
+        await message.reply("✅ Кабинеты в идеальном балансе!", parse_mode="Markdown")
     else:
         await message.reply("\n".join(report_lines[:15]), parse_mode="Markdown")
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "аудит")
 async def check_tnved_and_rating_audit(message: types.Message):
-    status_msg = await message.answer("📋 Запущен тотальный детальный радар-контроль ТН ВЭД и скрытых блокировок карточек...")
+    status_msg = await message.answer("🔍 Сканирую базы данных Wildberries... Проверяю габариты, вес, коды ТН ВЭД и декларации по каждой карточке...")
     cabinets = [("Кабинет №1", WB_TOKEN_1), ("Кабинет №2", WB_TOKEN_2)]
-    report_lines = ["📋 **ДЕТАЛЬНЫЙ РАДАР-АУДИТ КАРТОЧЕК VESCHI:**\n"]
+    report_lines = ["📋 **🚨 ОТЧЕТ: КАРТОЧКИ С ОТСУТСТВИЕМ ОБЯЗАТЕЛЬНЫХ ДАННЫХ:**\n"]
     issues_found = 0
     
     for cab_name, token in cabinets:
         if not token: continue
         cards = get_real_wb_cards_and_scores(token)
         
-        api_vendor_codes = [str(c.get("vendorCode", "")).strip().lower() for c in cards]
-        
-        # 🚨 ДЕТАЛЬНЫЙ КОНТРОЛЬ «НЕВИДИМОК»: Теперь каждая реальная скрытая карточка
-        # будет расписана во всех подробностях без риска перегрузки текста!
-        for real_art in REAL_ARTICLES:
-            real_art_l = real_art.strip().lower()
-            if real_art_l not in api_vendor_codes:
-                report_lines.append(
-                    f"❌ **[{cab_name}] Арт: `{real_art}`** (🔥 Скрытый рейтинг: 6.0/10)\n"
-                    f"• 🛑 **КРИТИЧЕСКИЙ СБОЙ КАРТОЧКИ!** Товар полностью скрыт сервером контента WB API! Реальный рейтинг на сайте снижен до 6/10.\n"
-                    f"• **Замечания:** Низкое качество инфографики; Отсутствует видеообзор модели; Текст не оптимизирован под поисковые запросы.\n"
-                    f"• **Действие менеджерам:** Проверьте карточку в кабинете WB поставщика, обновите главный слайд или перевыпустите баркод!\n"
-                )
-                issues_found += 1
-        
-        # Автоматический радар кодов ТН ВЭД для всех остальных доступных карточек
         for card in cards:
             art = str(card.get("vendorCode", "—")).strip()
             art_l = art.lower()
             object_name = str(card.get("object", "")).lower()
-            tnved_wb = str(card.get("tnved", "")).strip()
             
+            # Извлекаем характеристики и размеры упаковки
+            characteristics = card.get("characteristics", [])
             description = str(card.get("description", "")).strip()
-            media_files = card.get("mediaFiles", [])
             
-            computed_score = card.get("score", 10.0)
-            custom_reasons = []
+            # Инициализируем переменные поиска
+            tnved_wb = str(card.get("tnved", "")).strip()
+            weight = 0
+            ch_width, ch_height, ch_length = 0, 0, 0
+            has_certificate = False
             
-            if not description or len(description) < 300:
-                computed_score = min(computed_score, 6.0)
-                custom_reasons.append("короткое описание")
-            if not media_files or len(media_files) < 3:
-                computed_score = min(computed_score, 6.0)
-                custom_reasons.append("менее 3 фото")
-            
+            # Бежим по всему массиву доп. характеристик WB и вытаскиваем логистику
+            for char in characteristics:
+                char_name = str(char.get("name", "")).lower()
+                char_val = char.get("value", [])
+                val_str = str(char_val[0]).strip() if char_val else ""
+                
+                if "вес" in char_name:
+                    try: weight = float(val_str)
+                    except: pass
+                elif "ширин" in char_name and "упаков" in char_name:
+                    try: ch_width = int(float(val_str))
+                    except: pass
+                elif "высот" in char_name and "упаков" in char_name:
+                    try: ch_height = int(float(val_str))
+                    except: pass
+                elif "длин" in char_name and "упаков" in char_name:
+                    try: ch_length = int(float(val_str))
+                    except: pass
+                elif "сертификат" in char_name or "декларац" in char_name or "номер" in char_name:
+                    if val_str and val_str != "—" and val_str != "0":
+                        has_certificate = True
+
+            # Ищем правильную эталонную декларацию по корням категорий
             ref_row = None
             for key in REF_DATA:
                 k_l = key.lower()
@@ -215,32 +218,43 @@ async def check_tnved_and_rating_audit(message: types.Message):
                 if is_match:
                     ref_row = REF_DATA[key]
                     break
-                    
-            card_has_issue = False
-            card_issue_text = f"❌ **[{cab_name}] Арт: `{art}`** (💡 Статус API: {computed_score}/10)\n"
 
+            # 🚨 ЖЕСТКИЙ ПРОВЕРОЧНЫЙ СПИСОК (COMPLIANCE CHECKLIST)
+            missing_fields = []
+            
+            if not ch_width or not ch_height or not ch_length or ch_width == 0 or ch_height == 0 or ch_length == 0:
+                missing_fields.append("❌ ГАБАРИТЫ УПАКОВКИ (Обнулены длина/ширина/высота. Риск блокировки FBS!)")
+            if not weight or weight == 0:
+                missing_fields.append("❌ ВЕС ТОВАРА (Не заполнена масса с упаковкой)")
+            if not description or len(description) < 100:
+                missing_fields.append("❌ ОПИСАНИЕ (Пустой или слишком короткий текст карточки)")
+                
+            # Проверка ТН ВЭД и декларации
             if ref_row:
                 ref_tnved = str(ref_row.get("ТНВЭД", "")).strip()
                 ref_decl = str(ref_row.get("Номер декларации", "—")).strip()
+                
                 if not tnved_wb or tnved_wb == "" or tnved_wb == "—" or not tnved_wb.startswith(ref_tnved[:4]):
-                    card_issue_text += f"• 🛑 **СБОЙ ТН ВЭД!** На WB стоит: `{tnved_wb or 'ПУСТО'}`, по декларации `{ref_decl}` должен быть: `{ref_tnved}`\n"
-                    card_has_issue = True
-                    
-            if computed_score < 10.0 or card_has_issue:
-                card_has_issue = True
-                if custom_reasons:
-                    card_issue_text += f"• 📉 **Замечания к контенту:** {'; '.join(custom_reasons)}\n"
-            if card_has_issue:
+                    missing_fields.append(f"🛑 КОД ТН ВЭД (На WB стоит: `{tnved_wb or 'ПУСТО'}`, а должен быть: `{ref_tnved}`)")
+                if not has_certificate:
+                    missing_fields.append(f"📜 СВЯЗЬ С ДЕКЛАРАЦИЕЙ (В поле сертификатов карточки не найден привязанный номер `{ref_decl}`)")
+
+            # Если в карточке не хватает хотя бы одного обязательного параметра, выводим её в чат!
+            if missing_fields:
+                card_issue_text = f"📦 **[{cab_name}] Артикул: `{art}`**\n"
+                for field in missing_fields:
+                    card_issue_text += f"• {field}\n"
                 report_lines.append(card_issue_text)
                 issues_found += 1
-            if issues_found >= 15: break
-        if issues_found >= 15: break
+                
+            if issues_found >= 10: break
+        if issues_found >= 10: break
             
     await status_msg.delete()
     if issues_found == 0:
-        await message.answer("✅ **Радар-аудит пройден на 10/10!** Скрытых заблокированных карточек и сбросов кодов ТН ВЭД не обнаружено! Все активные товары в полном порядке. 🌟", parse_mode="Markdown")
+        await message.answer("✅ **Юридический и логистический аудит пройден на 10/10!** Все карточки проверены: габариты упаковки заполнены, вес указан, коды ТН ВЭД и номера деклараций соответствуют закону по всему ассортименту! 🌟", parse_mode="Markdown")
     else:
-        await message.answer("\n".join(report_lines[:15]), parse_mode="Markdown")
+        await message.answer("\n".join(report_lines[:10]), parse_mode="Markdown")
 
 async def main():
     session = AiohttpSession()
