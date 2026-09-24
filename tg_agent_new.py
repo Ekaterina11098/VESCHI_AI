@@ -239,8 +239,7 @@ async def check_tnved_and_rating_audit(message: types.Message):
         await message.answer("\n".join(report_lines), parse_mode="Markdown")
 
 async def main():
-    # 🌐 ЧИСТЫЙ ЗАПУСК БЕЗ КОНФЛИКТОВ ТИПОВ ДАННЫХ
-    # Бот запускается в стандартном режиме, а все задержки VPN обрабатывает встроенный логгер
+    # 🌐 ИДЕАЛЬНЫЙ ОБЛАЧНЫЙ ЗАПУСК ДЛЯ СЕРВЕРА
     global bot
     bot = Bot(token=BOT_TOKEN)
     
@@ -251,14 +250,9 @@ async def main():
     print("👜 Боевой асинхронный ИИ-агент VESCHI запущен и слушает чат...")
     
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Защитный цикл: если VPN оборвет связь, бот не вылетит, а мягко перезапустится через 3 секунды
-    while True:
-        try:
-            await dp.start_polling(bot)
-        except Exception as e:
-            print(f"📡 Временная задержка сети VPN: {e}. Переподключение через 3 секунды...")
-            await asyncio.sleep(3)
+    # Запускаем чистый опрос без тяжелых циклов while True
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
