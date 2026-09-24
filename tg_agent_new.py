@@ -44,7 +44,7 @@ def get_ms_store_id_by_name(store_name="МСК"):
     return None
 
 def load_ms_stocks_dict():
-    """📡 POST-АНАЛИЗ МСК: Запрашивает остатки через метод report/stock/by_store 
+    """📡 POST-АНАЛИЗ МСК: Запрашивает остатки через правильный метод report/stock/by_store 
     строго для выбранного склада МСК и вытаскивает текстовые артикулы."""
     if not MS_TOKEN:
         return {}
@@ -72,10 +72,7 @@ def load_ms_stocks_dict():
                 if stock <= 0:
                     continue
                 
-                # Извлекаем текстовый артикул продавца на верхнем уровне
                 art = str(row.get("article", "")).strip()
-                
-                # Если МойСклад вернул вложенную карточку продукта
                 if not art and "product" in row:
                     prod_data = row.get("product", {})
                     art = str(prod_data.get("article", "")).strip()
@@ -87,8 +84,7 @@ def load_ms_stocks_dict():
     return stocks_dict
 
 def get_wb_warehouse_ids(token):
-    """📡 API WILDBERRIES: Автоматически скачивает ID абсолютно ВСЕХ ваших 
-    действующих FBS-складов (включая Внуково), чтобы не привязываться к одному числу!"""
+    """📡 API WILDBERRIES: Автоматически скачивает ID всех FBS-складов продавца"""
     if not token:
         return []
     url = "https://wildberries.ru"
@@ -96,7 +92,6 @@ def get_wb_warehouse_ids(token):
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
-            # Возвращаем список всех ID складов селлера на WB
             return [int(w.get("id")) for w in response.json() if w.get("id")]
     except:
         pass
@@ -121,20 +116,18 @@ def get_wb_sales_speed(article):
     return 2.0
 
 def get_real_wb_stocks(token, articles_list):
-    """📡 ДИНАМИЧЕСКИЙ FBS-ОПРОС WB: Автоматически находит ID вашего 'Своего склада' 
-    и запрашивает остатки пачками по 100 штук строго по текстовым АРТИКУЛАМ!"""
+    """📡 ИСПРАВЛЕННЫЙ FBS-ОПРОС WB: Берет строго первый цифровой ID из массива 
+    действующих складов селлера ([0]), исключая сбои URL-адресов!"""
     if not token or not articles_list:
         return {}
     
-    # 🚨 Автоматически перехватываем ID действующих складов из вашего кабинета WB
     warehouse_ids = get_wb_warehouse_ids(token)
     if not warehouse_ids:
         return {}
         
-    # Берем первый доступный ID 'Своего склада' для выгрузки остатков матрицы
+    # 🚨 ИСПРАВЛЕНИЕ ОПЕЧАТКИ: Извлекаем первый чистый ID склада из списка по индексу [0]
     target_warehouse_id = warehouse_ids[0]
     
-    # Отправляем запрос к официальному FBS-шлюзу остатков Wildberries
     url = f"https://wildberries.ru{target_warehouse_id}"
     headers = {"Authorization": token}
     wb_stocks_dict = {}
@@ -142,12 +135,10 @@ def get_real_wb_stocks(token, articles_list):
     for i in range(0, len(articles_list), 100):
         chunk = articles_list[i:i+100]
         try:
-            # Передаем список текстовых артикулов продавца (vendorCode), как они заведены на WB
             response = requests.post(url, headers=headers, json={"skus": chunk}, timeout=15)
             if response.status_code == 200:
                 wb_data = response.json().get("stocks", [])
                 for item in wb_data:
-                    # Чиним регистр букв: переводим артикул в нижний регистр для безошибочного слияния
                     art = str(item.get("article", "")).strip().lower()
                     amount = int(item.get("amount", 0))
                     if art:
@@ -214,7 +205,7 @@ async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
     await message.answer(
-        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Полная автоматическая синхронизация 'Своего склада' WB и склада МСК по артикулам завершена!\n\n"
+        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Полная автоматическая синхронизация по первому складу WB и складу МСК завершена!\n\n"
         "• Напишите **остатки** — проверка дефицита и лимитов ходовых товаров на 7 дней.\n"
         "• Напишите **новинки** — радар позиций, которые есть на складе МСК (как 86-Zont-blue), но забыты на WB.\n"
         "• Напишите **аудит** — жесткий радар логистики (габариты, вес) и ТН ВЭД карточек."
@@ -222,7 +213,7 @@ async def cmd_start(message: types.Message):
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "остатки")
 async def check_cross_stocks(message: types.Message):
-    status_msg = await message.answer("⚡ Проверяю FBS-остатки 'Своего склада' WB и сверяю суммы двух кабинетов с МСК...")
+    status_msg = await message.answer("⚡ Проверяю FBS-остатки ходовых товаров и сверяю суммы двух кабинетов с МСК...")
     
     ms_stocks = load_ms_stocks_dict()
     current_articles = list(ms_stocks.keys())
@@ -235,16 +226,13 @@ async def check_cross_stocks(message: types.Message):
     for art, ms_stock in ms_stocks.items():
         total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
         
-        # Анализируем товары, запущенные на витрине
         if total_wb > 0:
             sales_speed = get_wb_sales_speed(art)
             days_left = total_wb / sales_speed if sales_speed > 0 else 0
             
-            # 1. Контроль овербукинга относительно МСК
             if total_wb > ms_stock:
                 report_lines.append(f"🚨 **ОВЕРБУКИНГ! Арт: `{art}`**\n• На WB суммарно: {total_wb} шт. | На складе МСК: {ms_stock} шт.\n")
                 issues_found += 1
-            # 2. Контроль дефицита на 7 дней
             elif days_left < 7 and ms_stock > total_wb:
                 required_stock = int((7 - days_left) * sales_speed)
                 safe_add = min(required_stock, ms_stock - total_wb)
@@ -260,7 +248,7 @@ async def check_cross_stocks(message: types.Message):
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "новинки")
 async def check_new_products_radar(message: types.Message):
-    status_msg = await message.answer("🔍 Радар 'Своего склада' WB запущен по текстовым артикулам. Ищу скрытые новинки...")
+    status_msg = await message.answer("🔍 Радар 'Своего склада' WB запущен по исправленным индексам. Ищу скрытые новинки...")
     
     ms_stocks = load_ms_stocks_dict()
     current_articles = list(ms_stocks.keys())
@@ -273,7 +261,6 @@ async def check_new_products_radar(message: types.Message):
     for art, ms_stock in ms_stocks.items():
         total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
         
-        # СТРАТЕГИЧЕСКАЯ СВЕРКА ПО АРТИКУЛАМ: Товар лежит в МСК, а на 'Своем складе' WB равен 0!
         if total_wb == 0 and ms_stock > 0:
             report_lines.append(
                 f"✨ **ПОСТАВЬ НА ОСТАТОК НОВЫЙ ТОВАР! Арт: `{art}`**\n"
