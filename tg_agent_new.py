@@ -36,10 +36,9 @@ def load_real_articles():
         return [line.strip() for line in f if line.strip()]
 def load_declarations_and_tnved():
     """Читает эталонные ТН ВЭД и Декларации из созданного csv-файла"""
-    file_path = "../data/declarations_tnved.csv"
+    # Универсальный облачный путь к файлу в корне репозитория
+    file_path = os.path.join(os.path.dirname(__file__), "declarations_tnved.csv")
     data = {}
-    if not os.path.exists(file_path):
-        file_path = "data/declarations_tnved.csv"
     if os.path.exists(file_path):
         with open(file_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -48,6 +47,7 @@ def load_declarations_and_tnved():
                 if kat:
                     data[kat] = row
     return data
+
 
 # Загружаем базовую матрицу товаров
 REAL_ARTICLES = load_real_articles()
