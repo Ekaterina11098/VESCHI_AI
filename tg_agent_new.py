@@ -5,6 +5,8 @@ Read only: this module never changes WB stock or product cards.
 import asyncio
 import math
 import os
+import re
+from urllib.parse import urlparse
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -82,22 +84,38 @@ def load_ms_stocks_dict():
         raise CheckError("Нет ссылки на склад МСК в ответе МойСклад")
     rows = ms_rows(f"{MS_API}/report/stock/bystore", filter=f"store={store_href}")
     stocks = defaultdict(float)
-    missing_article = 0
+    unresolved = []
+    # The stock-by-store report identifies goods through assortment/meta. Its
+    # top-level rows do not necessarily have an article field.
+    assortment_index = None
     for row in rows:
         entries = row.get("stockByStore")
         if not isinstance(entries, list):
             raise CheckError("Отчёт МойСклад не содержит stockByStore")
         amount = sum(float(e.get("stock") or 0) for e in entries
-                     if e.get("meta", {}).get("href") == store_href)
+                     if urlparse(e.get("meta", {}).get("href") or "").path == urlparse(store_href).path)
         if amount <= 0:
             continue
-        art = norm(row.get("article"))
+        assortment = row.get("assortment") or {}
+        art = norm(row.get("article") or assortment.get("article"))
         if not art:
-            missing_article += 1
-        else:
+            href = (assortment.get("meta") or row.get("meta") or {}).get("href")
+            if assortment_index is None:
+                goods = ms_rows(f"{MS_API}/entity/assortment")
+                assortment_index = {urlparse(g.get("meta", {}).get("href") or "").path: g for g in goods}
+            product = assortment_index.get(urlparse(href).path) if href else None
+            # A few entity types may be absent from the assortment listing.
+            if product is None and href and href.startswith(("https://api.moysklad.ru/", "https://online.moysklad.ru/")):
+                product = api("GET", href, MS_TOKEN, wb=False)
+            art = norm((product or {}).get("article"))
+            if not art:
+                unresolved.append(str(row.get("name") or assortment.get("name") or href or "без названия"))
+        if art:
             stocks[art] += amount
-    if missing_article:
-        raise CheckError(f"У {missing_article} товаров на МСК есть остаток, но нет артикула для сверки")
+    if unresolved:
+        sample = ", ".join(unresolved[:5])
+        raise CheckError(f"Не удалось сопоставить {len(unresolved)} товаров МСК с артикулом: {sample}. "
+                         "Проверьте артикулы этих товаров в МойСклад")
     return dict(stocks)
 
 
@@ -235,19 +253,32 @@ def card_issues(cards, cabinet, required_by_subject):
                            ("height", "высота"), ("weightBrutto", "вес упаковки")):
             if float(dimensions.get(key) or 0) <= 0:
                 missing.append(label)
-        if not card.get("tnved"):
-            missing.append("ТН ВЭД")
         subject = card.get("subjectID")
         if not subject:
             missing.append("ID предмета")
         else:
-            filled = {c.get("id") for c in (card.get("characteristics") or []) if c.get("value")}
-            for required in required_by_subject[subject]:
+            characteristics = card.get("characteristics") or []
+            filled = {c.get("id") for c in characteristics if c.get("value")}
+            definitions = required_by_subject[subject]
+            for required in (c for c in definitions if c.get("required") and not is_tnved_name(c.get("name"))):
                 if required["id"] not in filled:
                     missing.append(str(required.get("name") or required["id"]))
+            tnved_ids = {c.get("id") for c in definitions if is_tnved_name(c.get("name"))}
+            tnved_values = [card.get("tnved"), card.get("tnvedCode")]
+            tnved_chars = [c for c in characteristics
+                           if c.get("id") in tnved_ids or is_tnved_name(c.get("name"))]
+            tnved_values.extend(c.get("value") for c in tnved_chars)
+            # An absent property in the API response is not proof that the
+            # seller has not filled the field in the account interface.
+            if ("tnved" in card or "tnvedCode" in card or tnved_chars) and not any(tnved_values):
+                missing.append("ТН ВЭД")
         if missing:
             issues.append(f"{cabinet} {art}: " + ", ".join(missing))
     return issues
+
+
+def is_tnved_name(name):
+    return "тнвэд" in re.sub(r"[^а-яёa-z0-9]", "", norm(name)) or "tnved" in norm(name)
 
 
 def get_required_characteristics(token, cards):
@@ -256,7 +287,7 @@ def get_required_characteristics(token, cards):
         data = api("GET", f"{WB_CONTENT}/content/v2/object/charcs/{subject}", token)
         if data.get("error") or not isinstance(data.get("data"), list):
             raise CheckError(f"Не удалось загрузить обязательные поля предмета {subject}")
-        result[subject] = [c for c in data["data"] if c.get("required")]
+        result[subject] = data["data"]
     return result
 
 
@@ -275,7 +306,9 @@ async def send_issues(message, title, issues):
     if not issues:
         await message.answer("✅ " + title + ": отклонений не найдено")
         return
-    lines = [f"⚠️ {title} — найдено {len(issues)}:"] + ["• " + item for item in issues]
+    lines = [f"⚠️ {title} — найдено {len(issues)}:"] + ["• " + item for item in issues[:30]]
+    if len(issues) > 30:
+        lines.append(f"Показаны первые 30 из {len(issues)}. Уточните критерии аудита для полного списка.")
     chunk = ""
     for line in lines:
         if len(chunk) + len(line) + 1 > 3500:
@@ -292,12 +325,20 @@ async def run_check(message, kind):
         if kind == "аудит":
             required_tokens("WB_TOKEN_1", "WB_TOKEN_2")
             issues = []
+            tnved_unverified = 0
             for name, token in (("К1", WB_TOKEN_1), ("К2", WB_TOKEN_2)):
                 cards = await asyncio.to_thread(get_real_wb_cards_and_scores, token)
                 if not cards:
                     raise CheckError(f"Кабинет {name} вернул 0 карточек; аудит не завершён")
                 required = await asyncio.to_thread(get_required_characteristics, token, cards)
                 issues.extend(card_issues(cards, name, required))
+                for card in cards:
+                    ids = {c.get("id") for c in required.get(card.get("subjectID"), [])
+                           if is_tnved_name(c.get("name"))}
+                    exposed = any(c.get("id") in ids or is_tnved_name(c.get("name"))
+                                  for c in card.get("characteristics") or [])
+                    if "tnved" not in card and "tnvedCode" not in card and not exposed:
+                        tnved_unverified += 1
         else:
             ms, c1, c2, w1, w2, s1, s2 = await asyncio.to_thread(snapshot, kind == "остатки")
             if kind == "остатки":
@@ -306,6 +347,9 @@ async def run_check(message, kind):
                 issues = new_issues(ms, c1, c2, w1, w2)
         await status.delete()
         await send_issues(message, kind.capitalize(), issues)
+        if kind == "аудит" and tnved_unverified:
+            await message.answer(f"ℹ️ ТН ВЭД нельзя подтвердить по ответу API у {tnved_unverified} карточек: "
+                                 "поле не передано. Это не означает, что код отсутствует в личном кабинете WB.")
     except (CheckError, ValueError, TypeError) as exc:
         await status.edit_text(f"❌ Проверка «{kind}» не выполнена: {exc}")
 
