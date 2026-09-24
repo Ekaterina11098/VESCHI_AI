@@ -44,8 +44,8 @@ def get_ms_store_id_by_name(store_name="МСК"):
     return None
 
 def load_ms_stocks_dict():
-    """📡 POST-АНАЛИЗ МСК: Запрашивает остатки через правильный метод report/stock/by_store 
-    строго для выбранного склада МСК и вытаскивает текстовые артикулы."""
+    """📡 POST-АНАЛИЗ МСК: Запрашивает остатки через метод report/stock/by_store 
+    строго для выбранного склада МСК и очищает артикулы от пробелов и регистра."""
     if not MS_TOKEN:
         return {}
     
@@ -78,7 +78,8 @@ def load_ms_stocks_dict():
                     art = str(prod_data.get("article", "")).strip()
                 
                 if art:
-                    stocks_dict[art.lower()] = stock
+                    # Сохраняем в нижнем регистре без лишних невидимых пробелов по краям
+                    stocks_dict[art.lower().strip()] = stock
     except:
         pass
     return stocks_dict
@@ -116,8 +117,8 @@ def get_wb_sales_speed(article):
     return 2.0
 
 def get_real_wb_stocks(token, articles_list):
-    """📡 ИСПРАВЛЕННЫЙ FBS-ОПРОС WB: Берет строго первый цифровой ID из массива 
-    действующих складов селлера ([0]), исключая сбои URL-адресов!"""
+    """📡 FBS-ОПРОС WB: Скачивает остатки по первому ID склада 
+    и жестко очищает артикулы от регистра букв и случайных пробелов!"""
     if not token or not articles_list:
         return {}
     
@@ -125,9 +126,7 @@ def get_real_wb_stocks(token, articles_list):
     if not warehouse_ids:
         return {}
         
-    # 🚨 ИСПРАВЛЕНИЕ ОПЕЧАТКИ: Извлекаем первый чистый ID склада из списка по индексу [0]
     target_warehouse_id = warehouse_ids[0]
-    
     url = f"https://wildberries.ru{target_warehouse_id}"
     headers = {"Authorization": token}
     wb_stocks_dict = {}
@@ -139,7 +138,8 @@ def get_real_wb_stocks(token, articles_list):
             if response.status_code == 200:
                 wb_data = response.json().get("stocks", [])
                 for item in wb_data:
-                    art = str(item.get("article", "")).strip().lower()
+                    # 🚨 ТОТАЛЬНАЯ ОЧИСТКА: нижний регистр и снос невидимых пробелов по краям строки
+                    art = str(item.get("article", "")).lower().strip()
                     amount = int(item.get("amount", 0))
                     if art:
                         wb_stocks_dict[art] = amount
@@ -205,9 +205,9 @@ async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
     await message.answer(
-        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Полная автоматическая синхронизация по первому складу WB и складу МСК завершена!\n\n"
+        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Тотальный радар витрины и склада МСК успешно запущен!\n\n"
         "• Напишите **остатки** — проверка дефицита и лимитов ходовых товаров на 7 дней.\n"
-        "• Напишите **новинки** — радар позиций, которые есть на складе МСК (как 86-Zont-blue), но забыты на WB.\n"
+        "• Напишите **новинки** — радар позиций, которые есть на складе МСК (как 86-Zont-blue), но забыты или обнулены на WB.\n"
         "• Напишите **аудит** — жесткий радар логистики (габариты, вес) и ТН ВЭД карточек."
     )
 
@@ -226,13 +226,16 @@ async def check_cross_stocks(message: types.Message):
     for art, ms_stock in ms_stocks.items():
         total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
         
+        # Анализируем товары, запущенные на витрине
         if total_wb > 0:
             sales_speed = get_wb_sales_speed(art)
             days_left = total_wb / sales_speed if sales_speed > 0 else 0
             
+            # 1. Контроль овербукинга относительно МСК
             if total_wb > ms_stock:
                 report_lines.append(f"🚨 **ОВЕРБУКИНГ! Арт: `{art}`**\n• На WB суммарно: {total_wb} шт. | На складе МСК: {ms_stock} шт.\n")
                 issues_found += 1
+            # 2. Контроль дефицита на 7 дней
             elif days_left < 7 and ms_stock > total_wb:
                 required_stock = int((7 - days_left) * sales_speed)
                 safe_add = min(required_stock, ms_stock - total_wb)
@@ -248,20 +251,33 @@ async def check_cross_stocks(message: types.Message):
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "новинки")
 async def check_new_products_radar(message: types.Message):
-    status_msg = await message.answer("🔍 Радар 'Своего склада' WB запущен по исправленным индексам. Ищу скрытые новинки...")
+    status_msg = await message.answer("🔍 Радар тотального контроля витрины запущен. Сканирую карточки контента WB и сопоставляю регистры МСК...")
     
+    # Шаг 1: Скачиваем реальные остатки МСК (все артикулы в нижнем регистре)
     ms_stocks = load_ms_stocks_dict()
-    current_articles = list(ms_stocks.keys())
     
-    wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, current_articles)
-    wb_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, current_articles)
-    report_lines = ["🔥 **РАДАР НОВИНОК: ЕСТЬ НА СКЛАДЕ МСК, НО НЕТ НА ВИ ТРИНЕ WB:**\n"]
+    # Шаг 2: Безлимитно скачиваем ВСЕ карточки контента из кабинета WB
+    all_wb_cards = get_real_wb_cards_and_scores(WB_TOKEN_1) + get_real_wb_cards_and_scores(WB_TOKEN_2)
+    
+    # Собираем список артикулов, которые ФИЗИЧЕСКИ заведены на WB в виде карточек контента
+    wb_content_articles = [str(c.get("vendorCode", "")).lower().strip() for c in all_wb_cards]
+    
+    # Шаг 3: Скачиваем текущие активные FBS остатки WB
+    wb_active_stocks = get_real_wb_stocks(WB_TOKEN_1, list(ms_stocks.keys()))
+    wb_active_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, list(ms_stocks.keys()))
+    
+    report_lines = ["🔥 **РАДАР НОВИНОК: ЕСТЬ НА СКЛАДЕ МСК, НО ОБНУЛЕНЫ ИЛИ ОТСУТСТВУЮТ НА WB:**\n"]
     new_detected = 0
     
     for art, ms_stock in ms_stocks.items():
-        total_wb = wb_stocks_1.get(art, 0) + wb_stocks_2.get(art, 0)
+        # Считаем остаток по активным продажам
+        stock_1 = wb_active_stocks.get(art, 0)
+        stock_2 = wb_active_stocks_2.get(art, 0)
+        total_wb_stock = stock_1 + stock_2
         
-        if total_wb == 0 and ms_stock > 0:
+        # 🚨 СВЕРХУМНОЕ СЛИЯНИЕ ПО ТЕКСТОВОМУ АРТИКУЛУ:
+        # Товар лежит на МСК (ms_stock > 0), но на WB либо остаток чистый 0, либо карточка вообще не успела передать остаток в API!
+        if ms_stock > 0 and (total_wb_stock == 0 or art not in wb_content_articles):
             report_lines.append(
                 f"✨ **ПОСТАВЬ НА ОСТАТОК НОВЫЙ ТОВАР! Арт: `{art}`**\n"
                 f"• На складе МСК в наличии: **{ms_stock} шт.**\n"
@@ -292,10 +308,10 @@ async def check_tnved_and_rating_audit(message: types.Message):
         cards = get_real_wb_cards_and_scores(token)
         for card in cards:
             art = str(card.get("vendorCode", "—")).strip()
-            art_l = art.lower()
+            art_l = art.lower().strip()
             object_name = str(card.get("object", "")).lower()
             
-            if not any(art_l == real_art.lower().strip() for real_art in current_articles):
+            if art_l not in current_articles:
                 continue
                 
             characteristics = card.get("characteristics", [])
