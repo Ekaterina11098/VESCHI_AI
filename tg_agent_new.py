@@ -37,7 +37,6 @@ def get_ms_store_id_by_name(store_name="МСК"):
         if response.status_code == 200:
             stores = response.json().get("rows", [])
             for store in stores:
-                # Ищем склад, в названии которого есть "МСК" (регистр не важен)
                 if store_name.lower() in str(store.get("name", "")).lower():
                     return store.get("id")
     except:
@@ -45,33 +44,32 @@ def get_ms_store_id_by_name(store_name="МСК"):
     return None
 
 def load_ms_stocks_dict():
-    """📡 ПРЯМОЙ ОТЧЕТ МОЙ СКЛАД: Запрашивает остатки товаров строго по складу МСК 
-    и возвращает словарь вида {'артикул': количество}"""
+    """📡 ЖЕСТКИЙ ФИЛЬТР МСК: Запрашивает остатки через специализированный метод 
+    by_store строго для выбранного склада МСК, исключая общие остатки компании."""
     if not MS_TOKEN:
         return {}
     
-    # 🚨 Автоматически вычисляем ID вашего склада МСК
     store_id = get_ms_store_id_by_name("МСК")
+    stocks_dict = {}
     
+    # 🚨 ИСПОЛЬЗУЕМ ТОЧНЫЙ КАНАЛ ПО СКЛАДАМ: report/stock/by_store
     url = "https://moysklad.ru"
     headers = {
         "Authorization": f"Bearer {MS_TOKEN}",
         "Accept-Encoding": "gzip"
     }
-    stocks_dict = {}
     
-    # Задаем жесткий фильтр по складу МСК, если он успешно найден
     params = {"limit": 1000}
     if store_id:
-        params["store.id"] = store_id
+        params["storeId"] = store_id  # Передаем точный параметр ID для отчета by_store
         
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
+        response = requests.post(url, headers=headers, json={}, params=params, timeout=15)
         if response.status_code == 200:
             rows = response.json().get("rows", [])
             for row in rows:
                 art = str(row.get("article", "")).strip()
-                stock = int(row.get("stock", 0)) # Физ. остаток на выбранном складе
+                stock = int(row.get("stock", 0)) # Чистый остаток строго на МСК
                 
                 if art and stock > 0:
                     stocks_dict[art.lower()] = stock
@@ -178,7 +176,7 @@ async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
     await message.answer(
-        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Контролирую остатки строго по складу МСК!\n\n"
+        "Привет, Екатерина! 👜✨\nЯ ваш ИИ-супервайзер бренда VESCHI. Контролирую точные остатки по складу МСК!\n\n"
         "• Напишите **остатки** — проверка дефицита и лимитов ходовых товаров на 7 дней.\n"
         "• Напишите **новинки** — радар позиций, которые есть на складе МСК (как 86-Zont-blue), но забыты на WB.\n"
         "• Напишите **аудит** — жесткий радар логистики (габариты, вес) и ТН ВЭД карточек."
@@ -225,8 +223,26 @@ async def check_cross_stocks(message: types.Message):
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "новинки")
 async def check_new_products_radar(message: types.Message):
-    status_msg = await message.answer("🔍 Радар МСК запущен. Ищу товары с остатками на складе МСК, которых нет на WB...")
+    status_msg = await message.answer("🔍 Радар МСК запущен. Проверяю остатки...")
     
+    # Авто-диагностика на случай отсутствия склада МСК
+    if not get_ms_store_id_by_name("МСК"):
+        url = "https://moysklad.ru"
+        headers = {"Authorization": f"Bearer {MS_TOKEN}"}
+        try:
+            res = requests.get(url, headers=headers, timeout=15)
+            if res.status_code == 200:
+                stores = res.json().get("rows", [])
+                store_names = [f"• `{s.get('name')}`" for s in stores]
+                await status_msg.delete()
+                return await message.reply(
+                    f"🛑 **ОШИБКА НАЗВАНИЯ СКЛАДА!** Бот искал склад со словом `МСК`, но в вашем Моем Складе заведены только следующие имена:\n\n" + 
+                    "\n".join(store_names) + 
+                    "\n\n Напишите мне точное имя вашего склада из списка выше, и я мгновенно привяжу к нему радар!", 
+                    parse_mode="Markdown"
+                )
+        except: pass
+
     ms_stocks = load_ms_stocks_dict()
     current_articles = list(ms_stocks.keys())
     
