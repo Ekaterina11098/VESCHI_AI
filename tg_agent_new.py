@@ -52,20 +52,17 @@ REAL_ARTICLES = load_real_articles()
 REF_DATA = load_declarations_and_tnved()
 
 def get_wb_sales_speed(article):
-    """📈 ИМИТАЦИЯ СКОРОСТИ ПРОДАЖ: Возвращает средние продажи артикула в день.
-    Заложим базовые 2 шт/день для теста аналитики лимитов продаж на 7 дней."""
+    """📈 ИМИТАЦИЯ СКОРОСТИ ПРОДАЖ: Базовые 2 шт/день для теста аналитики лимитов."""
     return 2.0
 
 def get_real_wb_stocks(token, articles_list):
-    """📡 БЕЗЛИМИТНЫЙ ЗАПРОСFBS: Скачивает остатки пачками по 100 штук,
-    чтобы обойти лимиты WB API и не терять позиции."""
+    """📡 FBS остатки с WB пачками по 100 шт."""
     if not token or not articles_list:
         return {}
     url = "https://wildberries.ru"
     headers = {"Authorization": token}
     wb_stocks_dict = {}
     
-    # Режем огромный список артикулов на безопасные пачки по 100 элементов
     for i in range(0, len(articles_list), 100):
         chunk = articles_list[i:i+100]
         try:
@@ -81,8 +78,7 @@ def get_real_wb_stocks(token, articles_list):
             pass
     return wb_stocks_dict
 def get_real_wb_cards_and_scores(token):
-    """📡 БЕЗЛИМИТНЫЙ ЗАПРОС КАРТОЧЕК: Скачивает абсолютно ВСЕ карточки контента
-    через курсорную пагинацию, вытягивая замечания роботов WB по качеству."""
+    """📡 БЕЗЛИМИТНЫЙ ЗАПРОС КАРТОЧЕК: Скачивает абсолютно ВСЕ карточки контента через пагинацию."""
     if not token:
         return []
     headers = {"Authorization": token}
@@ -138,32 +134,25 @@ async def run_scheduled_stock_check():
 async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
-    await message.answer("Привет, Екатерина! 👜✨\nЯ ваш безлимитный ИИ-супервайзер бренда VESCHI.\n\n• Напишите **остатки** — тотальный анализ дефицита (все позиции).\n• Напишите **аудит** — глубокий аудит контента и кодов ТН ВЭД по всем страницам.")
+    await message.answer("Привет, Екатерина! 👜✨\nЯ ваш безлимитный ИИ-супервайзер бренда VESCHI.\n\n• Напишите **остатки** — тотальный анализ дефицита.\n• Напишите **аудит** — мгновенный радар сброса ТН ВЭД и дефектов карточек.")
 
 @dp.message(lambda message: message.text and message.text.lower().strip() == "остатки")
 async def check_cross_stocks(message: types.Message):
     status_msg = await message.answer("⚡ Провожу глубокий анализ дефицита, обнулений и лимитов по ВСЕМ артикулам...")
     wb_stocks_1 = get_real_wb_stocks(WB_TOKEN_1, REAL_ARTICLES)
     wb_stocks_2 = get_real_wb_stocks(WB_TOKEN_2, REAL_ARTICLES)
-    
     report_lines = ["📋 **АНАЛИТИКА УПУЩЕННОЙ ВЫРУЧКИ И ДЕФИЦИТА:**\n"]
     issues_found = 0
-    
     async with aiohttp.ClientSession() as session:
         tasks = [get_moysklad_stock_async(session, art) for art in REAL_ARTICLES]
         ms_results = await asyncio.gather(*tasks)
-        
     for art, ms_stock in ms_results:
         art_l = str(art).strip().lower()
-        stock_cab1 = wb_stocks_1.get(art_l, 0)
-        stock_cab2 = wb_stocks_2.get(art_l, 0)
-        total_wb = stock_cab1 + stock_cab2
-        
+        total_wb = wb_stocks_1.get(art_l, 0) + wb_stocks_2.get(art_l, 0)
         sales_speed = get_wb_sales_speed(art)
         days_left = total_wb / sales_speed if sales_speed > 0 and total_wb > 0 else 0
-        
         if total_wb == 0 and ms_stock > 0:
-            report_lines.append(f"🔥 **УПУЩЕННАЯ ВЫРУЧКА! Арт: `{art}`**\n• На WB: **0 шт.** | В Моем Складе РЕАЛЬНО ЕСТЬ: **{ms_stock} шт.**\n")
+            report_lines.append(f"🔥 **УПУЩЕННАЯ ВЫРУЧКА! Арт: `{art}`**\n• На WB: **0 шт.** | В Моем Складе: **{ms_stock} шт.**\n")
             issues_found += 1
         elif total_wb > ms_stock and ms_stock > 0:
             report_lines.append(f"🚨 **ОВЕРБУКИНГ! Арт: `{art}`**\n• На WB: {total_wb} шт. | В Моем Складе: {ms_stock} шт.\n")
@@ -172,17 +161,17 @@ async def check_cross_stocks(message: types.Message):
             required_stock = int((7 - days_left) * sales_speed)
             safe_add = min(required_stock, ms_stock - total_wb)
             if safe_add > 0:
-                report_lines.append(f"⚠️ **ДЕФИЦИТ НА 7 ДНЕЙ! Арт: `{art}`**\n• На WB хватит на **{round(days_left, 1)} дн.** | Свободно на производстве: {ms_stock} шт.\n• Рекомендация: Догрузите еще **+{safe_add} шт.**\n")
+                report_lines.append(f"⚠️ **ДЕФИЦИТ НА 7 ДНЕЙ! Арт: `{art}`**\n• На WB хватит на **{round(days_left, 1)} дн.** | Свободно: {ms_stock} шт. | Догрузить: **+{safe_add} шт.**\n")
                 issues_found += 1
-
     await status_msg.delete()
     if issues_found == 0:
         await message.reply("✅ **Кабинеты в идеальном балансе!** Товара на WB хватает минимум на 7 дней продаж по всей матрице артикулов.", parse_mode="Markdown")
     else:
         await message.reply("\n".join(report_lines[:15]), parse_mode="Markdown")
+
 @dp.message(lambda message: message.text and message.text.lower().strip() == "аудит")
 async def check_tnved_and_rating_audit(message: types.Message):
-    status_msg = await message.answer("📋 Запущен жесткий ИИ-аудит контента и кодов ТН ВЭД по всем страницам...")
+    status_msg = await message.answer("📋 Запущен жесткий автоматический радар-контроль ТН ВЭД и качества контента...")
     cabinets = [("Кабинет №1", WB_TOKEN_1), ("Кабинет №2", WB_TOKEN_2)]
     report_lines = ["📋 **ГЛУБОКИЙ АУДИТ КАРТОЧЕК КОНТЕНТА VESCHI (ВСЕ ПОЗИЦИИ):**\n"]
     issues_found = 0
@@ -193,52 +182,55 @@ async def check_tnved_and_rating_audit(message: types.Message):
         for card in cards:
             art = str(card.get("vendorCode", "—")).strip()
             object_name = str(card.get("object", "")).lower()
-            tnved_wb = str(card.get("tnved", "—")).strip()
+            tnved_wb = str(card.get("tnved", "")).strip()
             
             description = str(card.get("description", "")).strip()
             media_files = card.get("mediaFiles", [])
             
+            # Умный скоринг качества: если WB скрывает оценку 6, мы сами снизим балл по фактам!
             computed_score = card.get("score", 10.0)
             custom_reasons = []
             
-            # 🚨 1. ЗАЩИТА ОТ ОБМАНА WB API: Если это ваша конкретная проблемная карточка,
-            # мы принудительно выставим ей реальный коммерческий балл 6/10 и укажем дефекты!
-            # (Замените 'ТЕСТ_АРТИКУЛ' на реальный артикул вашей проблемной сумки/зонта с картинки)
-            if "ТЕСТ_АРТИКУЛ" in art.upper() or computed_score == 6.0:
-                computed_score = 6.0
-                custom_reasons.append("Низкое качество инфографики на главном фото; Отсутствует обязательный видеообзор товара; Описание не оптимизировано под ключевые запросы")
-            
-            # Стандартные автоматические проверки контента
-            if not description or len(description) < 150:
-                computed_score = min(computed_score, 7.0)
-                custom_reasons.append("Слишком короткое описание товара (менее 150 символов)")
+            if not description or len(description) < 300:
+                computed_score = min(computed_score, 6.0)
+                custom_reasons.append("Слишком короткое описание или сброшен текст карточки")
             if not media_files or len(media_files) < 3:
                 computed_score = min(computed_score, 6.0)
-                custom_reasons.append("Мало фотографий в карточке (рекомендуется от 3 до 5 шт)")
+                custom_reasons.append("В галерее менее 3 фото (риск падения конверсии)")
+            if not any("видео" in str(m).lower() for m in media_files) and len(media_files) > 0:
+                computed_score = min(computed_score, 7.0)
+                custom_reasons.append("Отсутствует видеообзор товара")
             
+            # 🛠 СВЕРХУМНЫЙ ПОИСК КАТЕГОРИИ: ищем пересечения корней слов по всей базе деклараций
             ref_row = None
             for key in REF_DATA:
-                if key in object_name or key in art.lower():
+                # Отрезаем окончания слов (сумк, рюкзак, зонт), чтобы ловить любые словосочетания Wildberries
+                short_key = key[:4]
+                if short_key in object_name or short_key in art.lower():
                     ref_row = REF_DATA[key]
                     break
                     
             card_has_issue = False
-            card_issue_text = f"❌ **[{cab_name}] Арт: `{art}`** (🔥 Реальный рейтинг: {computed_score}/10)\n"
+            card_issue_text = f"❌ **[{cab_name}] Арт: `{art}`** (🔥 Реальный статус: {computed_score}/10)\n"
 
-            # Умная сверка таможенных кодов по вхождению первых цифр
+            # 🚨 АВТОМАТИЧЕСКИЙ РАДАР СБРОСА ТН ВЭД
             if ref_row:
                 ref_tnved = str(ref_row.get("ТНВЭД", "")).strip()
-                if ref_tnved and not tnved_wb.startswith(ref_tnved[:4]):
-                    card_issue_text += f"• 🛑 **СБОЙ ТН ВЭД!** На WB прописан код: `{tnved_wb}`, а по вашей декларации должен начинаться на: `{ref_tnved[:4]}`\n"
+                ref_decl = str(ref_row.get("Номер декларации", "—")).strip()
+                
+                # Если WB сбросил код ТН ВЭД в ноль или он не совпадает по первым 4 цифрам
+                if not tnved_wb or tnved_wb == "" or tnved_wb == "—" or not tnved_wb.startswith(ref_tnved[:4]):
+                    card_issue_text += f"• 🛑 **КРИТИЧЕСКИЙ СБОЙ ТН ВЭД!** На WB прописано: `{tnved_wb or 'ПУСТО'}`, а по вашей декларации `{ref_decl}` должен быть код: `{ref_tnved}`\n"
                     card_has_issue = True
+            else:
+                # Если товар новый и его забыли внести в Excel-базу деклараций
+                card_issue_text += f"• ⚠️ **Неизвестный предмет!** Категория `{object_name}` не найдена в вашей Excel-базе деклараций ТН ВЭД.\n"
+                card_has_issue = True
                     
-            # Если выявили дефекты контента или низкий балл
             if computed_score < 10.0 or card_has_issue:
                 card_has_issue = True
                 if custom_reasons:
-                    card_issue_text += f"• 📉 **Дефекты контента:** {'; '.join(custom_reasons)}\n"
-                else:
-                    card_issue_text += f"• 📉 **Рейтинг снижен.** Проверьте полноту заполнения характеристик.\n"
+                    card_issue_text += f"• 📉 **Замечания к контенту:** {'; '.join(custom_reasons)}\n"
                     
             if card_has_issue:
                 report_lines.append(card_issue_text)
@@ -248,7 +240,7 @@ async def check_tnved_and_rating_audit(message: types.Message):
             
     await status_msg.delete()
     if issues_found == 0:
-        await message.answer("✅ **Аудит контента пройден на 10/10!** Все коды ТН ВЭД идеально соответствуют декларациям, скрытых дефектов заполнения карточек не обнаружено! 🌟", parse_mode="Markdown")
+        await message.answer("✅ **Радар-аудит пройден на 10/10!** Автоматический сканер проверил всю матрицу товаров: сбросов кодов ТН ВЭД не обнаружено, все описания и видео в карточках на месте! 🌟", parse_mode="Markdown")
     else:
         await message.answer("\n".join(report_lines[:15]), parse_mode="Markdown")
 
@@ -259,6 +251,3 @@ async def main():
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, handle_signals=False)
-
-
-           
