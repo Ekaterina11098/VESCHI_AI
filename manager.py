@@ -26,8 +26,11 @@ st.caption("Автоматизация ответов на отзывы Wildberr
 with st.sidebar:
     st.header("⚙️ Управление системой")
     if st.button("🔄 Проверить новые отзывы", type="primary", use_container_width=True):
-        st.session_state["feedbacks"] = get_unanswered_feedbacks()
-        st.success(f"Найдено отзывов: {len(st.session_state['feedbacks'])}")
+        try:
+            st.session_state["feedbacks"] = get_unanswered_feedbacks()
+            st.success(f"Найдено отзывов: {len(st.session_state['feedbacks'])}")
+        except RuntimeError as exc:
+            st.error(str(exc))
 
 feedbacks_list = st.session_state.get("feedbacks", [])
 

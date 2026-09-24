@@ -16,7 +16,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-24-r4"
+VERSION = "2026-09-24-r6"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -190,6 +190,19 @@ def collect_cabinet(token, include_stock=True):
     return cards, dict(totals)
 
 
+def cabinet_diagnostics(token):
+    cards = get_real_wb_cards_and_scores(token)
+    skus = sorted({str(s).strip() for card in cards for size in card.get("sizes") or []
+                   for s in size.get("skus") or [] if s})
+    warehouses = get_wb_warehouse_ids(token)
+    per_warehouse = []
+    for warehouse_id in warehouses:
+        amounts = get_real_wb_stocks(token, skus, warehouse_id)
+        per_warehouse.append((warehouse_id, len(amounts), sum(value > 0 for value in amounts.values()),
+                              sum(amounts.values())))
+    return len(cards), len(skus), per_warehouse
+
+
 def sales_speed(token, days=SALES_DAYS):
     """Average daily actual sales over a fixed calendar interval, returns excluded."""
     if days < 1 or days > 89:
@@ -232,10 +245,15 @@ def new_issues(ms, cards1, cards2, wb1, wb2):
     for art, qty in ms.items():
         if qty <= 0:
             continue
-        missing = [name for name, known, wb in (("К1", known1, wb1), ("К2", known2, wb2))
-                   if art not in known or wb.get(art, 0) <= 0]
+        a, b = wb1.get(art, 0), wb2.get(art, 0)
+        missing = []
+        for label, known, stock in (("К1", known1, a), ("К2", known2, b)):
+            if art not in known:
+                missing.append(f"{label}: карточка не найдена")
+            elif stock <= 0:
+                missing.append(f"{label}: остаток 0")
         if missing:
-            issues.append(f"{art}: МСК {qty:g}, WB К1 {wb1.get(art, 0):g}, К2 {wb2.get(art, 0):g}; проверить {', '.join(missing)}")
+            issues.append(f"{art}: МСК {qty:g}, WB К1 {a:g}, К2 {b:g}; " + "; ".join(missing))
     return issues
 
 
@@ -396,6 +414,21 @@ async def cmd_version(message: types.Message):
                          f"Кабинет 1: {WB_TOKEN_1_SOURCE} {'задан' if WB_TOKEN_1 else 'не задан'}\n"
                          f"Кабинет 2: {WB_TOKEN_2_SOURCE} {'задан' if WB_TOKEN_2 else 'не задан'}\n"
                          f"МойСклад: MOYSKLAD_API_TOKEN {'задан' if MS_TOKEN else 'не задан'}")
+
+
+@dp.message(Command("diagnostics"))
+async def cmd_diagnostics(message: types.Message):
+    try:
+        required_tokens("WB_TOKEN_1", "WB_TOKEN_2")
+        lines = [f"VESCHI AI {VERSION}: проверка данных FBS (без значений токенов)"]
+        for name, token in (("К1", WB_TOKEN_1), ("К2", WB_TOKEN_2)):
+            cards, skus, warehouses = await asyncio.to_thread(cabinet_diagnostics, token)
+            lines.append(f"{name}: карточек {cards}, баркодов {skus}, складов {len(warehouses)}")
+            lines.extend(f"  Склад {ident}: баркодов в ответе {returned}, с остатком {positive}, "
+                         f"штук {total:g}" for ident, returned, positive, total in warehouses)
+        await message.answer("\n".join(lines))
+    except CheckError as exc:
+        await message.answer(f"❌ Диагностика не выполнена: {exc}")
 
 
 @dp.message(lambda message: message.text and message.text.strip().casefold() in {"остатки", "новинки", "аудит"})

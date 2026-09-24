@@ -10,12 +10,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-WB_API_TOKEN = os.getenv("WB_API_TOKEN")
+# Reviews belong to the first seller account. Accept the same secret names as
+# the Telegram checks and do not prevent Streamlit from loading at import time.
+WB_API_TOKEN = os.getenv("WB_FEEDBACK_TOKEN") or os.getenv("WB_TOKEN_1") or os.getenv("WB_API_TOKEN")
 
-if not WB_API_TOKEN:
-    raise RuntimeError(
-        "Не найден WB_API_TOKEN. Проверьте файл .env"
-    )
+
+def feedback_token():
+    token = os.getenv("WB_FEEDBACK_TOKEN") or os.getenv("WB_TOKEN_1") or os.getenv("WB_API_TOKEN") or WB_API_TOKEN
+    if not token:
+        raise RuntimeError("Для отзывов нужен WB_TOKEN_1 либо WB_FEEDBACK_TOKEN с доступом к Отзывам WB")
+    return token
 
 
 BASE_URL = "https://feedbacks-api.wildberries.ru"
@@ -37,7 +41,7 @@ def request_wb(url, params=None):
     Ничего не публикует и ничего не изменяет в кабинете.
     """
     headers = {
-        "Authorization": WB_API_TOKEN
+        "Authorization": feedback_token()
     }
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -55,6 +59,10 @@ def request_wb(url, params=None):
 
         if response.status_code == 200:
             return response
+
+        if response.status_code in (401, 403):
+            raise RuntimeError("WB отклонил запрос отзывов (HTTP " + str(response.status_code) +
+                               "). Проверьте доступ токена отзывов к разделу «Отзывы»")
 
         if response.status_code == 429:
             retry_header = response.headers.get("X-RateLimit-Retry")
@@ -127,7 +135,7 @@ def post_review_reply(feedback_id, reply_text):
     url = f"{BASE_URL}/api/v1/feedbacks"
     
     headers = {
-        "Authorization": WB_API_TOKEN
+        "Authorization": feedback_token()
     }
     
     payload = {
@@ -199,7 +207,7 @@ def post_review_reply(feedback_id, reply_text):
     url = f"{BASE_URL}/api/v1/feedbacks"
     
     headers = {
-        "Authorization": WB_API_TOKEN
+        "Authorization": feedback_token()
     }
     
     payload = {
