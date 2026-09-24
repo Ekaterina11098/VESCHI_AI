@@ -16,9 +16,14 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
+VERSION = "2026-09-24-r4"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WB_TOKEN_1 = os.getenv("WB_TOKEN_1")
-WB_TOKEN_2 = os.getenv("WB_TOKEN_2")
+# Both naming schemes are supported. Prefer the names shown in the user's
+# current Streamlit secrets so a stale alias cannot silently select a token.
+WB_TOKEN_1 = os.getenv("WB_TOKEN_1") or os.getenv("WB_API_TOKEN")
+WB_TOKEN_2 = os.getenv("WB_TOKEN_2") or os.getenv("WB_API_TOKEN_2")
+WB_TOKEN_1_SOURCE = "WB_TOKEN_1" if os.getenv("WB_TOKEN_1") else "WB_API_TOKEN"
+WB_TOKEN_2_SOURCE = "WB_TOKEN_2" if os.getenv("WB_TOKEN_2") else "WB_API_TOKEN_2"
 MS_TOKEN = os.getenv("MOYSKLAD_API_TOKEN")
 MS_STORE_NAME = os.getenv("MOYSKLAD_STORE_NAME", "МСК")
 SALES_DAYS = int(os.getenv("SALES_DAYS", "28"))
@@ -302,9 +307,9 @@ def snapshot(with_sales=False):
 
 async def send_issues(message, title, issues):
     if not issues:
-        await message.answer("✅ " + title + ": отклонений не найдено")
+        await message.answer(f"✅ VESCHI AI {VERSION}: {title} — отклонений не найдено")
         return
-    lines = [f"⚠️ {title} — найдено {len(issues)}:"] + ["• " + item for item in issues[:30]]
+    lines = [f"⚠️ VESCHI AI {VERSION}: {title} — найдено {len(issues)}:"] + ["• " + item for item in issues[:30]]
     if len(issues) > 30:
         lines.append(f"Показаны первые 30 из {len(issues)}.")
     chunk = ""
@@ -318,7 +323,7 @@ async def send_issues(message, title, issues):
 
 
 async def run_check(message, kind):
-    status = await message.answer("Проверяю данные МойСклад и двух кабинетов WB…")
+    status = await message.answer(f"VESCHI AI {VERSION}: проверяю данные МойСклад и двух кабинетов WB…")
     try:
         if kind == "аудит":
             required_tokens("WB_TOKEN_1", "WB_TOKEN_2")
@@ -355,9 +360,11 @@ async def run_check(message, kind):
                 issues = new_issues(ms, c1, c2, w1, w2)
         await status.delete()
         if kind == "аудит" and not issues and (fields_unverified or tnved_unverified):
-            await message.answer("⚠️ Аудит: проверенные поля без отклонений; некоторые поля WB не передал в ответе API.")
+            await message.answer(f"⚠️ VESCHI AI {VERSION}: аудит — проверенные поля без отклонений; "
+                                 "некоторые поля WB не передал в ответе API.")
         elif kind != "аудит" and unresolved and not issues:
-            await message.answer(f"⚠️ {kind.capitalize()}: среди {len(ms)} сопоставленных товаров отклонений нет; "
+            await message.answer(f"⚠️ VESCHI AI {VERSION}: {kind.capitalize()} — "
+                                 f"среди {len(ms)} сопоставленных товаров отклонений нет; "
                                  f"ещё {len(unresolved)} товаров не проверены из-за отсутствующего артикула.")
         else:
             await send_issues(message, kind.capitalize(), issues)
@@ -372,14 +379,23 @@ async def run_check(message, kind):
             summary = ", ".join(f"{label} — {count}" for label, count in fields_unverified.items())
             await message.answer("ℹ️ Не проверены поля, которые WB не передал в ответе: " + summary)
     except (CheckError, ValueError, TypeError) as exc:
-        await status.edit_text(f"❌ Проверка «{kind}» не выполнена: {exc}")
+        await status.edit_text(f"❌ VESCHI AI {VERSION}: проверка «{kind}» не выполнена: {exc}")
 
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
-    await message.answer("VESCHI AI: отправьте «остатки», «новинки» или «аудит».")
+    await message.answer(f"VESCHI AI {VERSION}: отправьте «остатки», «новинки» или «аудит». "
+                         "Команда /version показывает версию и названия используемых секретов.")
+
+
+@dp.message(Command("version"))
+async def cmd_version(message: types.Message):
+    await message.answer(f"VESCHI AI {VERSION}\n"
+                         f"Кабинет 1: {WB_TOKEN_1_SOURCE} {'задан' if WB_TOKEN_1 else 'не задан'}\n"
+                         f"Кабинет 2: {WB_TOKEN_2_SOURCE} {'задан' if WB_TOKEN_2 else 'не задан'}\n"
+                         f"МойСклад: MOYSKLAD_API_TOKEN {'задан' if MS_TOKEN else 'не задан'}")
 
 
 @dp.message(lambda message: message.text and message.text.strip().casefold() in {"остатки", "новинки", "аудит"})
