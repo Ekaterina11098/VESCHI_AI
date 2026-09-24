@@ -29,11 +29,13 @@ WB_CONTENT_URL = "https://wildberries.ru"
 
 def load_real_articles():
     """Автоматически читает ВСЕ реальные артикулы из файла articles.txt"""
-    file_path = "articles.txt"
+    # Универсальный облачный путь к файлу в корне проекта
+    file_path = os.path.join(os.path.dirname(__file__), "articles.txt")
     if not os.path.exists(file_path):
         return []
     with open(file_path, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
+
 def load_declarations_and_tnved():
     """Читает эталонные ТН ВЭД и Декларации из созданного csv-файла"""
     # Универсальный облачный путь к файлу в корне репозитория
