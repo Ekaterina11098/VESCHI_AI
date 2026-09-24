@@ -17,7 +17,8 @@ PROMPT_PATH = BASE_DIR / "prompts" / "system_prompt.md"
 def load_system_prompt():
     if not PROMPT_PATH.exists():
         raise FileNotFoundError(f"Не найден файл промта: {PROMPT_PATH}")
-    return PROMPT_PATH.read_text(encoding="utf-8")
+    return PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt.md")
+
 
 def generate_draft(feedback):
     """
