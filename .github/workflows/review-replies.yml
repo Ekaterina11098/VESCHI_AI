@@ -19,6 +19,25 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install requests python-dotenv
+      - name: Проверить настройки без вывода секретов
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          WB_FEEDBACK_TOKEN: ${{ secrets.WB_FEEDBACK_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          missing = [key for key in ('SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'WB_FEEDBACK_TOKEN') if not os.getenv(key)]
+          for key in missing:
+              print(f'::error::В GitHub Repository secrets не задан {key}')
+          if missing:
+              sys.exit(1)
+          for key, prefix in (('SUPABASE_URL', 'https://'), ('SUPABASE_SECRET_KEY', 'sb_secret_')):
+              if not os.environ[key].startswith(prefix):
+                  print(f'::error::{key} задан, но имеет неверный формат (ожидается начало {prefix})')
+                  sys.exit(1)
+          print('Все три секрета заданы; проверяем подключение к Supabase.')
+          PY
       - run: python process_review_queue.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
