@@ -1,15 +1,11 @@
 import streamlit as st
 import json, os, requests
 from datetime import datetime
-from wildberries import get_unanswered_feedbacks, get_product_photos, post_review_reply
+from wildberries import get_unanswered_feedbacks, post_review_reply
 from openai_client import generate_draft
 from validator import validate_answer
 
 st.set_page_config(page_title="VESCHI AI", page_icon="👜", layout="wide")
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_product_photos():
-    return get_product_photos()
 
 if "benchmarks" not in st.session_state:
     st.session_state["benchmarks"] = []
@@ -57,8 +53,6 @@ feedbacks_list = st.session_state.get("feedbacks", [])
 if not feedbacks_list:
     st.info("👋 Привет! Нажмите кнопку **'Проверить новые отзывы'** на панели слева, чтобы загрузить свежие данные с Wildberries.")
 else:
-    with st.spinner("Загружаем фото товаров…"):
-        product_photos = cached_product_photos()
     for idx, fb in enumerate(feedbacks_list):
         fb_id = fb.get("id")
         user_name = fb.get("userName", "Покупатель")
@@ -68,19 +62,11 @@ else:
         product_name = details.get("productName") or fb.get("productName") or "Товар бренда VESCHI"
         nm_id = details.get("nmId") or fb.get("nmId")
         supplier_article = details.get("supplierArticle") or fb.get("supplierArticle")
-        product_photo = product_photos.get(str(nm_id)) if nm_id else None
         
         with st.container():
             st.markdown(f"### 💬 Отзыв от **{user_name}** на товар: *{product_name}*")
-            photo_column, info_column = st.columns([1, 4])
-            with photo_column:
-                if product_photo:
-                    st.image(product_photo, width=130)
-                else:
-                    st.caption("Фото товара недоступно")
-            with info_column:
-                st.write(f"**Артикул WB:** {nm_id or 'не передан WB'}")
-                st.write(f"**Артикул продавца:** {supplier_article or 'не передан WB'}")
+            st.write(f"**Артикул WB:** {nm_id or 'не передан WB'}")
+            st.write(f"**Артикул продавца:** {supplier_article or 'не передан WB'}")
             st.markdown(f"**Оценка:** {'⭐' * rating} | **ID отзыва:** `{fb_id}`")
             st.info(f"**Текст покупателя:** {text}")
             

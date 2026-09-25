@@ -1,5 +1,4 @@
 import os
-import time
 import requests
 from dotenv import load_dotenv
 
@@ -25,54 +24,6 @@ def feedback_token():
 BASE_URL = "https://feedbacks-api.wildberries.ru"
 
 
-def get_product_photos():
-    """One paginated catalog read for first-account product photos."""
-    token = os.getenv("WB_CONTENT_TOKEN") or os.getenv("WB_TOKEN_1") or os.getenv("WB_API_TOKEN")
-    if not token:
-        return {}
-    photos = {}
-    cursor = {"limit": 1000}
-    seen = set()
-    try:
-        while True:
-            response = requests.post(
-                "https://content-api.wildberries.ru/content/v2/get/cards/list",
-                headers={"Authorization": token},
-                json={"settings": {"cursor": cursor, "filter": {"withPhoto": -1}}},
-                timeout=30,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if isinstance(payload.get("data"), dict):
-                payload = payload["data"]
-            cards = payload.get("cards")
-            if not isinstance(cards, list):
-                return photos
-            for card in cards:
-                images = card.get("photos") or []
-                first = images[0] if images else {}
-                link = first.get("big") or first.get("square") or first.get("c516x688")
-                if card.get("nmID") and link:
-                    photos[str(card["nmID"])] = link
-            if len(cards) < cursor["limit"]:
-                break
-            next_cursor = payload.get("cursor") or {}
-            marker = (next_cursor.get("updatedAt"), next_cursor.get("nmID"))
-            if not all(marker) or marker in seen:
-                break
-            seen.add(marker)
-            cursor = {"limit": 1000, "updatedAt": marker[0], "nmID": marker[1]}
-    except (requests.RequestException, ValueError, TypeError):
-        pass  # Reviews still work if the Content API is unavailable.
-    return photos
-
-# Максимальное количество повторных попыток при HTTP 429
-MAX_RETRIES = 3
-
-# Если WB не сообщил, сколько ждать, используем это значение
-DEFAULT_RETRY_SECONDS = 60
-
-
 # ============================================================
 # ЗАПРОС К WILDBERRIES
 # ============================================================
@@ -86,56 +37,23 @@ def request_wb(url, params=None):
         "Authorization": feedback_token()
     }
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = requests.get(
-                url,
-                headers=headers,
-                params=params,
-                timeout=30
-            )
-        except requests.RequestException as error:
-            print("\nОшибка соединения с Wildberries:")
-            print(error)
-            return None
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=(4, 12))
+    except requests.RequestException as error:
+        raise RuntimeError("WB не ответил на запрос отзывов. Попробуйте обновить их позже") from error
 
-        if response.status_code == 200:
-            return response
+    if response.status_code == 200:
+        return response
 
-        if response.status_code in (401, 403):
-            raise RuntimeError("WB отклонил запрос отзывов (HTTP " + str(response.status_code) +
-                               "). Проверьте доступ токена отзывов к разделу «Отзывы»")
+    if response.status_code in (401, 403):
+        raise RuntimeError("WB отклонил запрос отзывов (HTTP " + str(response.status_code) +
+                           "). Проверьте доступ токена отзывов к разделу «Отзывы»")
 
-        if response.status_code == 429:
-            retry_header = response.headers.get("X-RateLimit-Retry")
-            retry_seconds = DEFAULT_RETRY_SECONDS
-
-            if retry_header:
-                try:
-                    retry_seconds = int(float(retry_header))
-                except (ValueError, TypeError):
-                    retry_seconds = DEFAULT_RETRY_SECONDS
-
-            retry_seconds = max(retry_seconds, 5)
-
-            print(f"\nWildberries временно ограничил запросы (HTTP 429). Попытка {attempt} из {MAX_RETRIES}.")
-
-            if attempt == MAX_RETRIES:
-                print("\nЛимит WB всё ещё действует. Автоматические попытки остановлены.")
-                return None
-
-            print(f"Ждём {retry_seconds} сек. перед следующей попыткой...")
-            time.sleep(retry_seconds)
-            continue
-
-        print(f"\nОшибка Wildberries API\nHTTP: {response.status_code}")
-        try:
-            print(response.json())
-        except ValueError:
-            print(response.text)
-        return None
-
-    return None
+    if response.status_code == 429:
+        retry = response.headers.get("X-RateLimit-Retry")
+        hint = f" Повторите через {retry} сек." if retry and retry.isdigit() else " Повторите позже."
+        raise RuntimeError("WB ограничил запросы отзывов (HTTP 429)." + hint)
+    raise RuntimeError(f"WB не загрузил отзывы (HTTP {response.status_code}). Повторите позже")
 
 
 # ============================================================
@@ -153,16 +71,14 @@ def get_unanswered_feedbacks(take=10, skip=0):
     }
 
     response = request_wb(url=url, params=params)
-    if response is None:
-        return []
-
     try:
         result = response.json()
     except ValueError:
-        print("Wildberries вернул ответ, который не удалось прочитать.")
-        return []
-
-    return result.get("data", {}).get("feedbacks", [])
+        raise RuntimeError("WB вернул нечитаемый ответ при загрузке отзывов")
+    feedbacks = (result.get("data") or {}).get("feedbacks")
+    if not isinstance(feedbacks, list):
+        raise RuntimeError("WB вернул неполный ответ при загрузке отзывов")
+    return feedbacks
 
 
 # ============================================================
