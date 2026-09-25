@@ -1,7 +1,8 @@
 import streamlit as st
 import json, os, requests
 from datetime import datetime
-from wildberries import get_unanswered_feedbacks, get_unanswered_questions, post_review_reply, post_question_reply
+from wildberries import get_unanswered_feedbacks, get_unanswered_questions, post_question_reply
+from review_queue import enqueue, get_reply, process_due
 from openai_client import generate_draft, generate_question_drafts
 from validator import validate_answer
 
@@ -22,19 +23,26 @@ def save_to_benchmarks(feedback_data, original_draft, final_answer):
 
 def publish_reply(feedback, original_draft, answer):
     fb_id = feedback.get("id")
-    if st.session_state.get(f"published_{fb_id}"):
-        st.info("Ответ на этот отзыв уже отправлен в этой сессии.")
+    existing = get_reply(fb_id)
+    if existing:
+        st.info("Этот ответ уже сохранён. Статус: " + existing["state"])
         return
     try:
+        enqueue(fb_id, answer)
         with st.spinner("Отправляем ответ на Wildberries…"):
-            post_review_reply(fb_id, answer)
-    except (RuntimeError, ValueError) as error:
-        st.error(f"Ответ не отправлен: {error}")
+            process_due(limit=1)
+    except (RuntimeError, ValueError, OSError) as error:
+        st.error(f"Не удалось сохранить или отправить ответ: {error}")
         return
-    st.session_state[f"published_{fb_id}"] = True
-    save_to_benchmarks(feedback, original_draft, answer)
-    st.balloons()
-    st.success("🎉 Ответ успешно отправлен на Wildberries!")
+    state = get_reply(fb_id)
+    if state["state"] == "sent":
+        st.session_state[f"published_{fb_id}"] = True
+        save_to_benchmarks(feedback, original_draft, answer)
+        st.success("Ответ опубликован на Wildberries!")
+    elif state["state"] == "pending":
+        st.warning("Ответ сохранён: WB ограничил запросы. Бот повторит отправку после окончания ограничения.")
+    else:
+        st.error("Ответ требует ручной проверки: " + state["error"])
 
 st.title("👜 Панель контент-менеджера бренда VESCHI")
 st.caption("Автоматизация ответов на отзывы Wildberries с помощью искусственного интеллекта и жесткой валидации")
@@ -72,6 +80,16 @@ with reviews_tab:
                 st.write(f"**Артикул продавца:** {supplier_article or 'не передан WB'}")
                 st.markdown(f"**Оценка:** {'⭐' * rating} | **ID отзыва:** `{fb_id}`")
                 st.info(f"**Текст покупателя:** {text}")
+                st.write(f"**Плюсы:** {fb.get('pros') or 'не указаны'}")
+                st.write(f"**Минусы:** {fb.get('cons') or 'не указаны'}")
+                queued = get_reply(fb_id) if fb_id else None
+                if queued:
+                    labels = {'sent': 'Опубликован', 'pending': 'Ожидает повторной отправки',
+                              'sending': 'Отправка начата; проверьте результат',
+                              'needs_check': 'Требует ручной проверки'}
+                    st.caption("Ответ: " + labels.get(queued['state'], queued['state']))
+                    if queued['state'] == 'needs_check':
+                        st.error(queued['error'])
             
                 btn_key = f"gen_{fb_id}_{idx}"
                 if st.button("✨ Создать черновики AI (2 варианты)", key=btn_key):

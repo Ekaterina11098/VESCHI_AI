@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from collections import defaultdict
@@ -18,7 +19,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-25-r17"
+VERSION = "2026-09-25-r20"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -194,6 +195,7 @@ def get_real_wb_cards_and_scores(token):
             raise CheckError("Не удалось получить все страницы карточек WB")
         seen.add(marker)
         cursor = {"limit": 100, "updatedAt": marker[0], "nmID": marker[1]}
+        time.sleep(0.65)  # WB Content allows approximately one request every 600 ms.
     return cards
 
 
@@ -339,7 +341,8 @@ def card_issues(cards, cabinet, required_by_subject):
             tnved_values.extend(c.get("value") for c in tnved_chars)
             # An absent property in the API response is not proof that the
             # seller has not filled the field in the account interface.
-            if ("tnved" in card or "tnvedCode" in card or tnved_chars) and not any(tnved_values):
+            if ("tnved" in card or "tnvedCode" in card or tnved_chars) and not any(
+                    has_tnved_value(value) for value in tnved_values):
                 missing.append("ТН ВЭД")
         if missing:
             issues.append(f"{cabinet} {art}: " + ", ".join(missing))
@@ -348,6 +351,108 @@ def card_issues(cards, cabinet, required_by_subject):
 
 def is_tnved_name(name):
     return "тнвэд" in re.sub(r"[^а-яёa-z0-9]", "", norm(name)) or "tnved" in norm(name)
+
+
+def has_tnved_value(value):
+    if isinstance(value, (list, tuple)):
+        return any(has_tnved_value(item) for item in value)
+    return value is not None and bool(str(value).strip()) and str(value).strip() != "0"
+
+
+def document_issues(card, today=None):
+    """Return confirmed business-rule issues and whether WB exposed document data."""
+    documents = card.get("documents")
+    if not isinstance(documents, dict) or not ({"items", "excludeDocuments"} & documents.keys()):
+        return [], False
+    if today is None:
+        today = datetime.now(timezone(timedelta(hours=3))).date()
+    subject = norm(card.get("subjectName"))
+    vendor = norm(card.get("vendorCode"))
+    if not subject and not re.search(r"(?:^|[-_])zont(?:[-_]|$)", vendor):
+        return [], False  # Cannot distinguish a special-category umbrella without its subject.
+    umbrella = "зонт" in subject or "umbrella" in subject or bool(re.search(r"(?:^|[-_])zont(?:[-_]|$)", vendor))
+    excluded = documents.get("excludeDocuments")
+    items = documents.get("items")
+    issues = []
+    if umbrella:
+        if excluded is False:
+            issues.append("отметить «документы не требуются»")
+        elif excluded is None:
+            return [], False
+        return issues, True
+    if excluded is True:
+        issues.append("снять отметку «документы не требуются»")
+    if not isinstance(items, list):
+        return issues, False
+    declarations = [item for item in items if isinstance(item, dict) and str(item.get("type")) == "2"]
+    if not declarations:
+        issues.append("нет декларации соответствия")
+        return issues, True
+    def problems(item):
+        missing = []
+        if not str(item.get("number") or "").strip():
+            missing.append("номер ДС")
+        for key, label in (("startDate", "дата начала ДС"), ("endDate", "дата окончания ДС")):
+            value = item.get(key)
+            if not value:
+                missing.append(label)
+                continue
+            try:
+                date = datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+            except ValueError:
+                missing.append(label)
+                continue
+            if key == "endDate" and date < today:
+                missing.append("срок ДС истёк")
+            if key == "startDate" and date > today:
+                missing.append("ДС ещё не действует")
+        return missing
+    # One valid declaration suffices; report the best candidate otherwise.
+    best = min((problems(item) for item in declarations), key=len)
+    issues.extend(best)
+    return issues, True
+
+
+def compliance_issues(cards, cabinet, today=None):
+    """Only confirmed TN VED/document issues, plus counts the API cannot verify."""
+    issues = []
+    tnved_unknown = documents_unknown = 0
+    for card in cards:
+        article = str(card.get("vendorCode") or card.get("nmID") or "без артикула")
+        missing = []
+        tnved_values = [card.get(key) for key in ("tnved", "tnvedCode") if key in card]
+        tnved_values.extend(char.get("value") for char in card.get("characteristics") or []
+                            if is_tnved_name(char.get("name")))
+        if not tnved_values:
+            tnved_unknown += 1
+        elif not any(has_tnved_value(value) for value in tnved_values):
+            missing.append("ТН ВЭД")
+        doc_errors, exposed = document_issues(card, today=today)
+        missing.extend(doc_errors)
+        if not exposed:
+            documents_unknown += 1
+        if missing:
+            issues.append(f"{cabinet} {article}: " + ", ".join(missing))
+    return issues, tnved_unknown, documents_unknown
+
+
+def compliance_manual_checks(cards, cabinet, today=None):
+    """List articles whose fields cannot be checked, without calling them defects."""
+    manual = []
+    for card in cards:
+        article = str(card.get("vendorCode") or card.get("nmID") or "без артикула")
+        values = [card.get(key) for key in ("tnved", "tnvedCode") if key in card]
+        values.extend(char.get("value") for char in card.get("characteristics") or []
+                      if is_tnved_name(char.get("name")))
+        fields = []
+        if not values:
+            fields.append("ТН ВЭД не передан")
+        _, docs_exposed = document_issues(card, today=today)
+        if not docs_exposed:
+            fields.append("документы/категория не переданы")
+        if fields:
+            manual.append(f"{cabinet} {article}: " + ", ".join(fields) + " — проверить вручную")
+    return manual
 
 
 def get_required_characteristics(token, cards):
@@ -390,38 +495,20 @@ async def send_issues(message, title, issues, max_items=30):
 
 
 async def run_check(message, kind):
-    status = await message.answer(f"VESCHI AI {VERSION}: проверяю данные МойСклад и двух кабинетов WB…")
+    status = await message.answer(f"VESCHI AI {VERSION}: проверяю два кабинета WB…" if kind == "аудит"
+                                  else f"VESCHI AI {VERSION}: проверяю МойСклад и два кабинета WB…")
     try:
         if kind == "аудит":
             required_tokens("WB_TOKEN_1", "WB_TOKEN_2")
             issues = []
-            tnved_unverified = 0
-            tnved_unverified_articles = []
-            fields_unverified = defaultdict(int)
+            manual = []
             for name, token in (("К1", WB_TOKEN_1), ("К2", WB_TOKEN_2)):
                 cards = await asyncio.to_thread(get_real_wb_cards_and_scores, token)
                 if not cards:
                     raise CheckError(f"Кабинет {name} вернул 0 карточек; аудит не завершён")
-                required = await asyncio.to_thread(get_required_characteristics, token, cards)
-                issues.extend(card_issues(cards, name, required))
-                for card in cards:
-                    for key, label in (("title", "название"), ("description", "описание"),
-                                       ("photos", "фото"), ("dimensions", "габариты/вес")):
-                        if key not in card:
-                            fields_unverified[label] += 1
-                    if isinstance(card.get("dimensions"), dict):
-                        for key, label in (("length", "длина"), ("width", "ширина"),
-                                           ("height", "высота"), ("weightBrutto", "вес упаковки")):
-                            if key not in card["dimensions"]:
-                                fields_unverified[label] += 1
-                    ids = {c.get("id") for c in required.get(card.get("subjectID"), [])
-                           if is_tnved_name(c.get("name"))}
-                    exposed = any(c.get("id") in ids or is_tnved_name(c.get("name"))
-                                  for c in card.get("characteristics") or [])
-                    if "tnved" not in card and "tnvedCode" not in card and not exposed:
-                        tnved_unverified += 1
-                        article = str(card.get("vendorCode") or card.get("nmID") or "без артикула")
-                        tnved_unverified_articles.append(f"{name} {article}: ТН ВЭД не передан API")
+                found, _, _ = compliance_issues(cards, name)
+                issues.extend(found)
+                manual.extend(compliance_manual_checks(cards, name))
         else:
             ms, c1, c2, w1, w2, s1, s2, unresolved = await asyncio.to_thread(snapshot, kind == "остатки")
             if kind == "остатки":
@@ -429,13 +516,13 @@ async def run_check(message, kind):
             else:
                 issues = new_issues(ms, c1, c2, w1, w2)
         await status.delete()
-        if kind == "аудит" and not issues and (fields_unverified or tnved_unverified):
-            await message.answer(f"⚠️ VESCHI AI {VERSION}: аудит — проверенные поля без отклонений; "
-                                 "некоторые поля WB не передал в ответе API.")
-        elif kind != "аудит" and unresolved and not issues:
+        if kind != "аудит" and unresolved and not issues:
             await message.answer(f"⚠️ VESCHI AI {VERSION}: {kind.capitalize()} — "
                                  f"среди {len(ms)} сопоставленных товаров отклонений нет; "
                                  f"ещё {len(unresolved)} товаров не проверены из-за отсутствующего артикула.")
+        elif kind == "аудит" and manual and not issues:
+            await message.answer(f"ℹ️ VESCHI AI {VERSION}: по доступным полям исправлений не найдено; "
+                                 "часть карточек осталась непроверенной.")
         else:
             await send_issues(message, kind.capitalize(), issues,
                               max_items=None if kind == "аудит" else 30)
@@ -443,14 +530,8 @@ async def run_check(message, kind):
             await message.answer("⚠️ Отдельно проверьте артикулы в МойСклад: " +
                                  ", ".join(unresolved[:10]) +
                                  (f" (ещё {len(unresolved) - 10})" if len(unresolved) > 10 else ""))
-        if kind == "аудит" and tnved_unverified:
-            await message.answer(f"ℹ️ ТН ВЭД нельзя подтвердить по ответу API у {tnved_unverified} карточек: "
-                                 "поле не передано. Это не означает, что код отсутствует в личном кабинете WB.")
-            await send_issues(message, "ТН ВЭД не проверен по API", tnved_unverified_articles,
-                              max_items=None)
-        if kind == "аудит" and fields_unverified:
-            summary = ", ".join(f"{label} — {count}" for label, count in fields_unverified.items())
-            await message.answer("ℹ️ Не проверены поля, которые WB не передал в ответе: " + summary)
+        if kind == "аудит" and manual:
+            await send_issues(message, "Проверить вручную (WB не передал поля)", manual, max_items=None)
     except (CheckError, ValueError, TypeError) as exc:
         await status.edit_text(f"❌ VESCHI AI {VERSION}: проверка «{kind}» не выполнена: {exc}")
 
@@ -556,6 +637,22 @@ class _BotMessage:
         await bot.send_message(self.chat_id, text)
 
 
+async def run_queued_review_replies():
+    from review_queue import process_due
+    try:
+        results = await asyncio.to_thread(process_due)
+    except (RuntimeError, OSError) as exc:
+        if MY_CHAT_ID or FEEDBACK_STATE.get("chat_id"):
+            await bot.send_message(MY_CHAT_ID or FEEDBACK_STATE["chat_id"],
+                                   f"⚠️ Очередь ответов WB не обработана: {exc}")
+        return
+    for feedback_id, state in results:
+        if state in ("sent", "needs_check") and (MY_CHAT_ID or FEEDBACK_STATE.get("chat_id")):
+            label = "опубликован" if state == "sent" else "требует ручной проверки"
+            await bot.send_message(MY_CHAT_ID or FEEDBACK_STATE["chat_id"],
+                                   f"Ответ на отзыв {feedback_id}: {label}.")
+
+
 async def main():
     global bot
     required_tokens("BOT_TOKEN")
@@ -565,6 +662,8 @@ async def main():
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(run_scheduled_stock_check, "cron", hour="9,15", minute=0)
     scheduler.add_job(run_scheduled_feedback_check, "cron", minute=10,
+                      max_instances=1, coalesce=True)
+    scheduler.add_job(run_queued_review_replies, "interval", minutes=5,
                       max_instances=1, coalesce=True)
     scheduler.start()
     try:

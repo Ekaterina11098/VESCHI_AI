@@ -1,5 +1,6 @@
 import os
 import requests
+import re
 from dotenv import load_dotenv
 
 
@@ -22,6 +23,12 @@ def feedback_token():
 
 
 BASE_URL = "https://feedbacks-api.wildberries.ru"
+
+
+class ReviewRateLimit(RuntimeError):
+    def __init__(self, retry_seconds):
+        self.retry_seconds = retry_seconds
+        super().__init__(f"WB временно ограничил публикацию (HTTP 429). Следующая попытка через {retry_seconds} сек.")
 
 
 # ============================================================
@@ -136,6 +143,11 @@ def post_review_reply(feedback_id, reply_text):
     except requests.RequestException as error:
         raise RuntimeError("Не удалось получить подтверждение WB. Проверьте отзыв в кабинете перед повторной отправкой") from error
     if not 200 <= response.status_code < 300:
+        if response.status_code == 429:
+            header = response.headers.get("X-RateLimit-Retry", "")
+            match = re.search(r"\d+", header)
+            retry_seconds = max(60, min(int(match.group()) if match else 3600, 86400))
+            raise ReviewRateLimit(retry_seconds)
         detail = response.text.strip()[:400]
         raise RuntimeError(f"WB не принял ответ (HTTP {response.status_code})" +
                            (f": {detail}" if detail else ""))
@@ -170,4 +182,3 @@ if __name__ == "__main__":
         print(f"\nПолучено отзывов: {len(feedbacks)}")
         for feedback in feedbacks:
             print_feedback(feedback)
-
