@@ -19,7 +19,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-25-r21"
+VERSION = "2026-09-25-r22"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -38,15 +38,15 @@ WB_STATS = "https://statistics-api.wildberries.ru"
 dp = Dispatcher()
 MY_CHAT_ID = None
 FEEDBACK_STATE_PATH = Path(__file__).with_name("telegram_feedback_state.json")
-FEEDBACK_STATE = {"seen": [], "chat_id": None, "initialized": False}
+FEEDBACK_STATE = {"seen": [], "seen_questions": [], "chat_id": None, "initialized": False}
 
 
 def load_feedback_state():
     try:
         data = json.loads(FEEDBACK_STATE_PATH.read_text(encoding="utf-8"))
         if isinstance(data, dict) and isinstance(data.get("seen"), list):
-            FEEDBACK_STATE.update({"seen": data["seen"], "chat_id": data.get("chat_id"),
-                                   "initialized": bool(data.get("initialized"))})
+            FEEDBACK_STATE.update({"seen": data["seen"], "seen_questions": data.get("seen_questions", []),
+                                   "chat_id": data.get("chat_id"), "initialized": bool(data.get("initialized"))})
     except (OSError, ValueError, TypeError):
         pass
 
@@ -542,7 +542,7 @@ async def cmd_start(message: types.Message):
     MY_CHAT_ID = message.chat.id
     FEEDBACK_STATE["chat_id"] = MY_CHAT_ID
     save_feedback_state()
-    await message.answer(f"VESCHI AI {VERSION}: отправьте «остатки», «новинки» или «аудит». "
+    await message.answer(f"VESCHI AI {VERSION}: отправьте «остатки», «новинки», «аудит» или «Отзывы». "
                          "Команда /version показывает версию. Проверяю новые отзывы раз в час.")
 
 
@@ -579,6 +579,42 @@ async def cmd_msdiagnostics(message: types.Message):
         await message.answer("\n".join(lines)[:3800])
     except CheckError as exc:
         await message.answer(f"❌ Диагностика МойСклад не выполнена: {exc}")
+
+
+async def check_reviews_and_questions(message):
+    """One request per section; only report a clean result for successful API responses."""
+    from wildberries import get_unanswered_feedbacks, get_unanswered_questions
+    lines = []
+    for title, loader, state_key in (
+        ("Отзывы", get_unanswered_feedbacks, "seen"),
+        ("Вопросы", get_unanswered_questions, "seen_questions"),
+    ):
+        try:
+            items = await asyncio.to_thread(loader, take=100)
+            if not isinstance(items, list):
+                raise RuntimeError("WB не вернул список")
+        except (RuntimeError, ValueError, TypeError) as exc:
+            lines.append(f"❌ {title}: не удалось проверить — {exc}")
+            continue
+        ids = [str(item["id"]) for item in items if isinstance(item, dict) and item.get("id")]
+        previous = set(FEEDBACK_STATE.get(state_key) or [])
+        new_ids = [ident for ident in ids if ident not in previous]
+        count = f"не менее {len(items)}" if len(items) == 100 else str(len(items))
+        if previous:
+            lines.append(f"📩 {title}: новых с предыдущей проверки {len(new_ids)}; ожидают ответа {count}."
+                         + (" Показаны первые 100." if len(items) == 100 else ""))
+        else:
+            lines.append(f"ℹ️ {title}: ожидают ответа {count}. Это первая проверка; "
+                         "какие из них новые, определить пока нельзя."
+                         + (" Показаны первые 100." if len(items) == 100 else ""))
+        FEEDBACK_STATE[state_key] = list(dict.fromkeys(ids + list(previous)))[:500]
+    save_feedback_state()
+    await message.answer("\n".join(lines))
+
+
+@dp.message(lambda message: message.text and message.text.strip().casefold() in {"отзывы", "/отзывы"})
+async def cmd_reviews(message: types.Message):
+    await check_reviews_and_questions(message)
 
 
 @dp.message(lambda message: message.text and message.text.strip().casefold() in {"остатки", "новинки", "аудит"})
