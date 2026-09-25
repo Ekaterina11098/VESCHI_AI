@@ -23,7 +23,11 @@ def save_to_benchmarks(feedback_data, original_draft, final_answer):
 
 def publish_reply(feedback, original_draft, answer):
     fb_id = feedback.get("id")
-    existing = get_reply(fb_id)
+    try:
+        existing = get_reply(fb_id)
+    except RuntimeError as error:
+        st.error(str(error))
+        return
     if existing:
         st.info("Этот ответ уже сохранён. Статус: " + existing["state"])
         return
@@ -40,7 +44,7 @@ def publish_reply(feedback, original_draft, answer):
         save_to_benchmarks(feedback, original_draft, answer)
         st.success("Ответ опубликован на Wildberries!")
     elif state["state"] == "pending":
-        st.warning("Ответ сохранён: WB ограничил запросы. Бот повторит отправку после окончания ограничения.")
+        st.warning("Ответ сохранён: WB ограничил запросы. GitHub Actions повторит отправку после окончания ограничения при следующем запуске по расписанию.")
     else:
         st.error("Ответ требует ручной проверки: " + state["error"])
 
@@ -82,7 +86,11 @@ with reviews_tab:
                 st.info(f"**Текст покупателя:** {text}")
                 st.write(f"**Плюсы:** {fb.get('pros') or 'не указаны'}")
                 st.write(f"**Минусы:** {fb.get('cons') or 'не указаны'}")
-                queued = get_reply(fb_id) if fb_id else None
+                try:
+                    queued = get_reply(fb_id) if fb_id else None
+                except RuntimeError as error:
+                    queued = None
+                    st.warning(f"Очередь ответов недоступна: {error}")
                 if queued:
                     labels = {'sent': 'Опубликован', 'pending': 'Ожидает повторной отправки',
                               'sending': 'Отправка начата; проверьте результат',

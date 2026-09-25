@@ -19,7 +19,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-25-r20"
+VERSION = "2026-09-25-r21"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -637,22 +637,6 @@ class _BotMessage:
         await bot.send_message(self.chat_id, text)
 
 
-async def run_queued_review_replies():
-    from review_queue import process_due
-    try:
-        results = await asyncio.to_thread(process_due)
-    except (RuntimeError, OSError) as exc:
-        if MY_CHAT_ID or FEEDBACK_STATE.get("chat_id"):
-            await bot.send_message(MY_CHAT_ID or FEEDBACK_STATE["chat_id"],
-                                   f"⚠️ Очередь ответов WB не обработана: {exc}")
-        return
-    for feedback_id, state in results:
-        if state in ("sent", "needs_check") and (MY_CHAT_ID or FEEDBACK_STATE.get("chat_id")):
-            label = "опубликован" if state == "sent" else "требует ручной проверки"
-            await bot.send_message(MY_CHAT_ID or FEEDBACK_STATE["chat_id"],
-                                   f"Ответ на отзыв {feedback_id}: {label}.")
-
-
 async def main():
     global bot
     required_tokens("BOT_TOKEN")
@@ -662,8 +646,6 @@ async def main():
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(run_scheduled_stock_check, "cron", hour="9,15", minute=0)
     scheduler.add_job(run_scheduled_feedback_check, "cron", minute=10,
-                      max_instances=1, coalesce=True)
-    scheduler.add_job(run_queued_review_replies, "interval", minutes=5,
                       max_instances=1, coalesce=True)
     scheduler.start()
     try:
