@@ -8,6 +8,7 @@ from validator import validate_answer
 
 load_dotenv()
 PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt.md")
+QUESTIONS_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "questions_prompt.md")
 
 
 def load_system_prompt():
@@ -81,3 +82,50 @@ def generate_draft(feedback):
         raise
     except Exception as error:
         raise RuntimeError("Не удалось создать черновики. Проверьте настройки OpenAI и попробуйте ещё раз") from error
+
+
+def generate_question_drafts(question):
+    """Generate two distinct answers to a product question for manual review."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Не настроен OPENAI_API_KEY в Secrets")
+    with open(QUESTIONS_PROMPT_PATH, encoding="utf-8") as prompt_file:
+        prompt = prompt_file.read()
+    details = question.get("productDetails") or {}
+    name = str(question.get("userName") or "").strip()
+    if name.casefold() in ("покупатель", "гость", "аноним"):
+        name = ""
+    opening = f"{name}, добрый день." if name else "Добрый день!"
+    context = (f"Имя покупателя: {name or 'не указано'}\n"
+               f"Модель: {details.get('productName') or 'не указана'}\n"
+               f"Артикул продавца: {details.get('supplierArticle') or 'не указан'}\n"
+               f"Вопрос: {question.get('text') or ''}\n"
+               f"Начни строго с «{opening}».")
+    check_data = {"userName": name, "text": question.get("text") or "", "productValuation": 0}
+    client = OpenAI(api_key=api_key)
+
+    def create(direction):
+        response = client.chat.completions.create(
+            model="gpt-4o-mini", temperature=0.9,
+            messages=[{"role": "system", "content": prompt},
+                      {"role": "user", "content": context + "\n" + direction}],
+        )
+        return (response.choices[0].message.content or "").strip()
+
+    try:
+        for _ in range(3):
+            first = create("Вариант 1: конкретный, краткий и деловой. Только текст ответа.")
+            if validate_answer(first, check_data)["approved"]:
+                break
+        else:
+            raise RuntimeError("Не удалось подготовить корректный ответ на вопрос")
+        for _ in range(3):
+            second = create("Вариант 2: более тёплый, другие формулировки и порядок мыслей. "
+                            "Не копируй вариант 1. Только текст ответа.\nВариант 1:\n" + first)
+            if validate_answer(second, check_data)["approved"] and _sufficiently_different(first, second):
+                return {"variant1": first, "variant2": second}
+        raise RuntimeError("Не удалось получить достаточно отличающийся второй ответ на вопрос")
+    except RuntimeError:
+        raise
+    except Exception as error:
+        raise RuntimeError("Не удалось подготовить ответы на вопрос. Повторите позже") from error

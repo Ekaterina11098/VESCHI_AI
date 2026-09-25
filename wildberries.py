@@ -81,6 +81,41 @@ def get_unanswered_feedbacks(take=10, skip=0):
     return feedbacks
 
 
+def get_unanswered_questions(take=10, skip=0):
+    """Read unanswered product questions from the same WB account."""
+    response = request_wb(
+        f"{BASE_URL}/api/v1/questions",
+        params={"isAnswered": "false", "take": take, "skip": skip, "order": "dateDesc"},
+    )
+    try:
+        questions = (response.json().get("data") or {}).get("questions")
+    except ValueError as error:
+        raise RuntimeError("WB вернул нечитаемый ответ на запрос вопросов") from error
+    if not isinstance(questions, list):
+        raise RuntimeError("WB вернул неполный список вопросов")
+    return questions
+
+
+def post_question_reply(question_id, reply_text):
+    """Post exactly once after a manager presses the publication button."""
+    if not question_id or not str(reply_text or "").strip():
+        raise ValueError("Нужны ID вопроса и непустой ответ")
+    try:
+        response = requests.patch(
+            f"{BASE_URL}/api/v1/questions",
+            headers={"Authorization": feedback_token()},
+            json={"id": question_id, "text": reply_text, "state": "wbRu"},
+            timeout=30,
+        )
+    except requests.RequestException as error:
+        raise RuntimeError("Нет подтверждения WB. Проверьте вопрос в кабинете перед повторной отправкой") from error
+    if not 200 <= response.status_code < 300:
+        detail = response.text.strip()[:400]
+        raise RuntimeError(f"WB не принял ответ на вопрос (HTTP {response.status_code})" +
+                           (f": {detail}" if detail else ""))
+    return True
+
+
 # ============================================================
 # НОВАЯ ФУНКЦИЯ: ПУБЛИКАЦИЯ ОТВЕТА НА WB
 # ============================================================
@@ -135,5 +170,4 @@ if __name__ == "__main__":
         print(f"\nПолучено отзывов: {len(feedbacks)}")
         for feedback in feedbacks:
             print_feedback(feedback)
-
 

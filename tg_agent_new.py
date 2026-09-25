@@ -3,9 +3,11 @@
 Read only: this module never changes WB stock or product cards.
 """
 import asyncio
+import json
 import math
 import os
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -16,7 +18,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-24-r11"
+VERSION = "2026-09-25-r17"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -34,6 +36,27 @@ WB_STATS = "https://statistics-api.wildberries.ru"
 
 dp = Dispatcher()
 MY_CHAT_ID = None
+FEEDBACK_STATE_PATH = Path(__file__).with_name("telegram_feedback_state.json")
+FEEDBACK_STATE = {"seen": [], "chat_id": None, "initialized": False}
+
+
+def load_feedback_state():
+    try:
+        data = json.loads(FEEDBACK_STATE_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("seen"), list):
+            FEEDBACK_STATE.update({"seen": data["seen"], "chat_id": data.get("chat_id"),
+                                   "initialized": bool(data.get("initialized"))})
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def save_feedback_state():
+    try:
+        temp = FEEDBACK_STATE_PATH.with_suffix(".tmp")
+        temp.write_text(json.dumps(FEEDBACK_STATE, ensure_ascii=False), encoding="utf-8")
+        temp.replace(FEEDBACK_STATE_PATH)
+    except OSError:
+        pass  # Keep the in-memory state when the deployment directory is read-only.
 
 
 class CheckError(RuntimeError):
@@ -436,8 +459,10 @@ async def run_check(message, kind):
 async def cmd_start(message: types.Message):
     global MY_CHAT_ID
     MY_CHAT_ID = message.chat.id
+    FEEDBACK_STATE["chat_id"] = MY_CHAT_ID
+    save_feedback_state()
     await message.answer(f"VESCHI AI {VERSION}: отправьте «остатки», «новинки» или «аудит». "
-                         "Команда /version показывает версию и названия используемых секретов.")
+                         "Команда /version показывает версию. Проверяю новые отзывы раз в час.")
 
 
 @dp.message(Command("version"))
@@ -494,6 +519,35 @@ async def run_scheduled_stock_check():
         await _BotMessage(MY_CHAT_ID).answer(f"❌ Автопроверка не выполнена: {exc}")
 
 
+async def run_scheduled_feedback_check():
+    """One read each hour; notify only about unseen review IDs."""
+    chat_id = MY_CHAT_ID or FEEDBACK_STATE.get("chat_id") or os.getenv("TELEGRAM_CHAT_ID")
+    if not chat_id:
+        return
+    try:
+        from wildberries import get_unanswered_feedbacks
+        feedbacks = await asyncio.to_thread(get_unanswered_feedbacks, take=100)
+    except (RuntimeError, ValueError, TypeError):
+        # On 429 or a transient error, wait until the next scheduled hour.
+        return
+    current_ids = [str(item["id"]) for item in feedbacks if item.get("id")]
+    previous = set(FEEDBACK_STATE.get("seen") or [])
+    if not FEEDBACK_STATE.get("initialized"):
+        FEEDBACK_STATE["initialized"] = True
+        FEEDBACK_STATE["seen"] = current_ids[:500]
+        save_feedback_state()
+        return  # The first poll establishes a baseline, not a flood of old reviews.
+    new_ids = [item for item in current_ids if item not in previous]
+    if new_ids:
+        try:
+            await bot.send_message(chat_id, "📩 У вас новый отзыв на Wildberries." if len(new_ids) == 1
+                                   else f"📩 У вас новые отзывы на Wildberries: {len(new_ids)}.")
+        except Exception:
+            return  # Preserve unseen IDs for the next scheduled attempt.
+    FEEDBACK_STATE["seen"] = list(dict.fromkeys(current_ids + list(previous)))[:500]
+    save_feedback_state()
+
+
 class _BotMessage:
     def __init__(self, chat_id):
         self.chat_id = chat_id
@@ -505,10 +559,13 @@ class _BotMessage:
 async def main():
     global bot
     required_tokens("BOT_TOKEN")
+    load_feedback_state()
     bot = Bot(token=BOT_TOKEN)
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(run_scheduled_stock_check, "cron", hour="9,15", minute=0)
+    scheduler.add_job(run_scheduled_feedback_check, "cron", minute=10,
+                      max_instances=1, coalesce=True)
     scheduler.start()
     try:
         await bot.delete_webhook(drop_pending_updates=True)

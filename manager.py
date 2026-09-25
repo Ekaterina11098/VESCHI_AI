@@ -1,8 +1,8 @@
 import streamlit as st
 import json, os, requests
 from datetime import datetime
-from wildberries import get_unanswered_feedbacks, post_review_reply
-from openai_client import generate_draft
+from wildberries import get_unanswered_feedbacks, get_unanswered_questions, post_review_reply, post_question_reply
+from openai_client import generate_draft, generate_question_drafts
 from validator import validate_answer
 
 st.set_page_config(page_title="VESCHI AI", page_icon="👜", layout="wide")
@@ -39,6 +39,8 @@ def publish_reply(feedback, original_draft, answer):
 st.title("👜 Панель контент-менеджера бренда VESCHI")
 st.caption("Автоматизация ответов на отзывы Wildberries с помощью искусственного интеллекта и жесткой валидации")
 
+reviews_tab, questions_tab = st.tabs(["💬 Отзывы", "❓ Вопросы покупателей"])
+
 with st.sidebar:
     st.header("⚙️ Управление системой")
     if st.button("🔄 Проверить новые отзывы", type="primary", use_container_width=True):
@@ -48,76 +50,134 @@ with st.sidebar:
         except RuntimeError as exc:
             st.error(str(exc))
 
-feedbacks_list = st.session_state.get("feedbacks", [])
+with reviews_tab:
+    feedbacks_list = st.session_state.get("feedbacks", [])
 
-if not feedbacks_list:
-    st.info("👋 Привет! Нажмите кнопку **'Проверить новые отзывы'** на панели слева, чтобы загрузить свежие данные с Wildberries.")
-else:
-    for idx, fb in enumerate(feedbacks_list):
-        fb_id = fb.get("id")
-        user_name = fb.get("userName", "Покупатель")
-        rating = fb.get("productValuation", 5)
-        text = fb.get("text", "⚠️ Отзыв без текста")
-        details = fb.get("productDetails") or {}
-        product_name = details.get("productName") or fb.get("productName") or "Товар бренда VESCHI"
-        nm_id = details.get("nmId") or fb.get("nmId")
-        supplier_article = details.get("supplierArticle") or fb.get("supplierArticle")
+    if not feedbacks_list:
+        st.info("👋 Привет! Нажмите кнопку **'Проверить новые отзывы'** на панели слева, чтобы загрузить свежие данные с Wildberries.")
+    else:
+        for idx, fb in enumerate(feedbacks_list):
+            fb_id = fb.get("id")
+            user_name = fb.get("userName", "Покупатель")
+            rating = fb.get("productValuation", 5)
+            text = fb.get("text", "⚠️ Отзыв без текста")
+            details = fb.get("productDetails") or {}
+            product_name = details.get("productName") or fb.get("productName") or "Товар бренда VESCHI"
+            nm_id = details.get("nmId") or fb.get("nmId")
+            supplier_article = details.get("supplierArticle") or fb.get("supplierArticle")
         
-        with st.container():
-            st.markdown(f"### 💬 Отзыв от **{user_name}** на товар: *{product_name}*")
-            st.write(f"**Артикул WB:** {nm_id or 'не передан WB'}")
-            st.write(f"**Артикул продавца:** {supplier_article or 'не передан WB'}")
-            st.markdown(f"**Оценка:** {'⭐' * rating} | **ID отзыва:** `{fb_id}`")
-            st.info(f"**Текст покупателя:** {text}")
+            with st.container():
+                st.markdown(f"### 💬 Отзыв от **{user_name}** на товар: *{product_name}*")
+                st.write(f"**Артикул WB:** {nm_id or 'не передан WB'}")
+                st.write(f"**Артикул продавца:** {supplier_article or 'не передан WB'}")
+                st.markdown(f"**Оценка:** {'⭐' * rating} | **ID отзыва:** `{fb_id}`")
+                st.info(f"**Текст покупателя:** {text}")
             
-            btn_key = f"gen_{fb_id}_{idx}"
-            if st.button("✨ Создать черновики AI (2 варианты)", key=btn_key):
-                with st.spinner("🤖 Нейросеть VESCHI AI анализирует отзыв..."):
+                btn_key = f"gen_{fb_id}_{idx}"
+                if st.button("✨ Создать черновики AI (2 варианты)", key=btn_key):
+                    with st.spinner("🤖 Нейросеть VESCHI AI анализирует отзыв..."):
+                        try:
+                            res = generate_draft(fb)
+                        except RuntimeError as error:
+                            st.error(str(error))
+                        else:
+                            st.session_state[f"v1_{fb_id}"] = res.get("variant1", "")
+                            st.session_state[f"v2_{fb_id}"] = res.get("variant2", "")
+                            st.session_state[f"txt1_{fb_id}_{idx}"] = res["variant1"]
+                            st.session_state[f"txt2_{fb_id}_{idx}"] = res["variant2"]
+            
+                v1_saved = st.session_state.get(f"v1_{fb_id}", "")
+                v2_saved = st.session_state.get(f"v2_{fb_id}", "")
+            
+                if v1_saved or v2_saved:
+                    st.write("---")
+                    st.subheader("💡 Выберите лучший черновик VESCHI AI")
+                    tab1, tab2 = st.tabs(["📝 Вариант 1 (Основной)", "🧠 Вариант 2 (Альтернативный)"])
+                
+                    with tab1:
+                        area_key_1 = f"txt1_{fb_id}_{idx}"
+                        edited_v1 = st.text_area("Текст ответа (Вариант 1):", value=v1_saved, height=150, key=area_key_1)
+                        val_res1 = validate_answer(edited_v1, fb)
+                        if val_res1["approved"]:
+                            st.success("✅ Черновик одобрен Валидатором!")
+                            pub_key_1 = f"pub1_{fb_id}_{idx}"
+                            if st.button("🚀 Опубликовать Вариант 1 на WB", key=pub_key_1, type="primary"):
+                                publish_reply(fb, v1_saved, edited_v1)
+                        else:
+                            st.error("❌ Черновик заблокирован Validator!")
+                            for err in val_res1["errors"]: st.markdown(f"🔴 *{err}*")
+                
+                    with tab2:
+                        area_key_2 = f"txt2_{fb_id}_{idx}"
+                        edited_v2 = st.text_area("Текст ответа (Вариант 2):", value=v2_saved, height=150, key=area_key_2)
+                        val_res2 = validate_answer(edited_v2, fb)
+                        if val_res2["approved"]:
+                            st.success("✅ Черновик одобрен Валидатором!")
+                            pub_key_2 = f"pub2_{fb_id}_{idx}"
+                            if st.button("🚀 Опубликовать Вариант 2 на WB", key=pub_key_2, type="primary"):
+                                publish_reply(fb, v2_saved, edited_v2)
+                        else:
+                            st.error("❌ Черновик заблокирован Validator!")
+                            for err in val_res2["errors"]: st.markdown(f"🔴 *{err}*")
+            st.write("---")
+
+    if st.session_state["benchmarks"]:
+        st.write("## 🏆 База лучших ответов бренда (Бенчмарки)")
+        st.dataframe(st.session_state["benchmarks"], use_container_width=True)
+
+with questions_tab:
+    st.caption("Вопросы загружаются только по кнопке. Ответы публикуются только после вашего нажатия.")
+    if st.button("🔄 Проверить новые вопросы", key="load_questions"):
+        try:
+            with st.spinner("Получаем вопросы WB…"):
+                st.session_state["questions"] = get_unanswered_questions()
+        except RuntimeError as error:
+            st.error(str(error))
+
+    questions = st.session_state.get("questions", [])
+    if not questions:
+        st.info("Неотвеченные вопросы пока не загружены или их нет.")
+    for idx, question in enumerate(questions):
+        question_id = question.get("id")
+        if not question_id:
+            continue
+        details = question.get("productDetails") or {}
+        name = str(question.get("userName") or "").strip()
+        if name.casefold() in ("покупатель", "гость", "аноним"):
+            name = ""
+        check_data = {"userName": name, "text": question.get("text") or "", "productValuation": 0}
+        st.markdown(f"### ❓ {details.get('productName') or 'Товар VESCHI'}")
+        st.write(f"**Артикул WB:** {details.get('nmId') or 'не передан WB'}")
+        st.write(f"**Артикул продавца:** {details.get('supplierArticle') or 'не передан WB'}")
+        st.info(question.get("text") or "Вопрос без текста")
+        if st.button("✨ Подготовить 2 варианта ответа", key=f"question_gen_{question_id}_{idx}"):
+            try:
+                with st.spinner("Готовим ответы на вопрос…"):
+                    drafts = generate_question_drafts(question)
+            except RuntimeError as error:
+                st.error(str(error))
+            else:
+                for number in (1, 2):
+                    st.session_state[f"question_text_{number}_{question_id}"] = drafts[f"variant{number}"]
+        for number in (1, 2):
+            key = f"question_text_{number}_{question_id}"
+            if key not in st.session_state:
+                continue
+            with st.expander(f"Вариант {number}", expanded=number == 1):
+                answer = st.text_area(f"Ответ на вопрос, вариант {number}", key=key, height=150)
+                validation = validate_answer(answer, check_data)
+                if not validation["approved"]:
+                    for issue in validation["errors"]:
+                        st.error(issue)
+                elif st.session_state.get(f"question_sent_{question_id}"):
+                    st.success("Ответ на этот вопрос уже отправлен в этой сессии")
+                elif st.button("🚀 Опубликовать ответ на WB", key=f"question_post_{number}_{question_id}"):
                     try:
-                        res = generate_draft(fb)
-                    except RuntimeError as error:
+                        with st.spinner("Отправляем ответ на WB…"):
+                            post_question_reply(question_id, answer)
+                    except (RuntimeError, ValueError) as error:
                         st.error(str(error))
                     else:
-                        st.session_state[f"v1_{fb_id}"] = res.get("variant1", "")
-                        st.session_state[f"v2_{fb_id}"] = res.get("variant2", "")
-                        st.session_state[f"txt1_{fb_id}_{idx}"] = res["variant1"]
-                        st.session_state[f"txt2_{fb_id}_{idx}"] = res["variant2"]
-            
-            v1_saved = st.session_state.get(f"v1_{fb_id}", "")
-            v2_saved = st.session_state.get(f"v2_{fb_id}", "")
-            
-            if v1_saved or v2_saved:
-                st.write("---")
-                st.subheader("💡 Выберите лучший черновик VESCHI AI")
-                tab1, tab2 = st.tabs(["📝 Вариант 1 (Основной)", "🧠 Вариант 2 (Альтернативный)"])
-                
-                with tab1:
-                    area_key_1 = f"txt1_{fb_id}_{idx}"
-                    edited_v1 = st.text_area("Текст ответа (Вариант 1):", value=v1_saved, height=150, key=area_key_1)
-                    val_res1 = validate_answer(edited_v1, fb)
-                    if val_res1["approved"]:
-                        st.success("✅ Черновик одобрен Валидатором!")
-                        pub_key_1 = f"pub1_{fb_id}_{idx}"
-                        if st.button("🚀 Опубликовать Вариант 1 на WB", key=pub_key_1, type="primary"):
-                            publish_reply(fb, v1_saved, edited_v1)
-                    else:
-                        st.error("❌ Черновик заблокирован Validator!")
-                        for err in val_res1["errors"]: st.markdown(f"🔴 *{err}*")
-                
-                with tab2:
-                    area_key_2 = f"txt2_{fb_id}_{idx}"
-                    edited_v2 = st.text_area("Текст ответа (Вариант 2):", value=v2_saved, height=150, key=area_key_2)
-                    val_res2 = validate_answer(edited_v2, fb)
-                    if val_res2["approved"]:
-                        st.success("✅ Черновик одобрен Валидатором!")
-                        pub_key_2 = f"pub2_{fb_id}_{idx}"
-                        if st.button("🚀 Опубликовать Вариант 2 на WB", key=pub_key_2, type="primary"):
-                            publish_reply(fb, v2_saved, edited_v2)
-                    else:
-                        st.error("❌ Черновик заблокирован Validator!")
-                        for err in val_res2["errors"]: st.markdown(f"🔴 *{err}*")
-        st.write("---")
-
-if st.session_state["benchmarks"]:
-    st.write("## 🏆 База лучших ответов бренда (Бенчмарки)")
-    st.dataframe(st.session_state["benchmarks"], use_container_width=True)
+                        st.session_state[f"question_sent_{question_id}"] = True
+                        st.success("Ответ на вопрос отправлен в WB")
+        st.divider()
