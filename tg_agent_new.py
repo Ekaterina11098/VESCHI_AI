@@ -19,7 +19,7 @@ from aiogram.filters import Command
 from dotenv import load_dotenv
 
 load_dotenv()
-VERSION = "2026-09-25-r23"
+VERSION = "2026-09-25-r24"
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Both naming schemes are supported. Prefer the names shown in the user's
 # current Streamlit secrets so a stale alias cannot silently select a token.
@@ -286,8 +286,8 @@ def stock_issues(ms, wb1, wb2, speed1, speed2):
             issues.append(f"{art}: превышение МСК — WB {total:g} (К1 {a:g}, К2 {b:g}), МСК {ms_qty:g}")
         if speed > 0 and total < target:
             add = min(max(0, target - total), max(0, ms_qty - total))
-            extra = f", можно добавить {add:g} из МСК" if add > 0 else ""
-            issues.append(f"{art}: запас {total/speed:.1f} дн.; нужно {target:g}{extra}")
+            if add > 0:
+                issues.append(f"{art}: запас {total/speed:.1f} дн.; нужно {target:g}, можно добавить {add:g} из МСК")
     return issues
 
 
