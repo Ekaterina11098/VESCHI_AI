@@ -24,6 +24,48 @@ def feedback_token():
 
 BASE_URL = "https://feedbacks-api.wildberries.ru"
 
+
+def get_product_photos():
+    """One paginated catalog read for first-account product photos."""
+    token = os.getenv("WB_CONTENT_TOKEN") or os.getenv("WB_TOKEN_1") or os.getenv("WB_API_TOKEN")
+    if not token:
+        return {}
+    photos = {}
+    cursor = {"limit": 1000}
+    seen = set()
+    try:
+        while True:
+            response = requests.post(
+                "https://content-api.wildberries.ru/content/v2/get/cards/list",
+                headers={"Authorization": token},
+                json={"settings": {"cursor": cursor, "filter": {"withPhoto": -1}}},
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload.get("data"), dict):
+                payload = payload["data"]
+            cards = payload.get("cards")
+            if not isinstance(cards, list):
+                return photos
+            for card in cards:
+                images = card.get("photos") or []
+                first = images[0] if images else {}
+                link = first.get("big") or first.get("square") or first.get("c516x688")
+                if card.get("nmID") and link:
+                    photos[str(card["nmID"])] = link
+            if len(cards) < cursor["limit"]:
+                break
+            next_cursor = payload.get("cursor") or {}
+            marker = (next_cursor.get("updatedAt"), next_cursor.get("nmID"))
+            if not all(marker) or marker in seen:
+                break
+            seen.add(marker)
+            cursor = {"limit": 1000, "updatedAt": marker[0], "nmID": marker[1]}
+    except (requests.RequestException, ValueError, TypeError):
+        pass  # Reviews still work if the Content API is unavailable.
+    return photos
+
 # Максимальное количество повторных попыток при HTTP 429
 MAX_RETRIES = 3
 

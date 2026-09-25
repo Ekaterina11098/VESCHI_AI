@@ -46,7 +46,7 @@ def validate_answer(answer, feedback):
     review_text = normalize(feedback.get("text"))
     pros = normalize(feedback.get("pros"))
     cons = normalize(feedback.get("cons"))
-    user_name = feedback.get("userName", "").strip()
+    user_name = str(feedback.get("userName") or "").strip()
 
     # ========================================================
     # 1. ПРОВЕРКА ПОДПИСИ (ОБНОВЛЕНО: Гибкий поиск текста)
@@ -57,21 +57,12 @@ def validate_answer(answer, feedback):
     # ========================================================
     # 2. ОБЯЗАТЕЛЬНОЕ ПРИВЕТСТВИЕ И ИМЯ ПОКУПАТЕЛЯ
     # ========================================================
-    has_greeting = (
-        answer_lower.startswith("добрый день") or 
-        answer_lower.startswith("здравствуйте") or
-        (user_name and answer_lower.startswith(user_name.lower()))
-    )
-    
-    if not has_greeting:
-        # Если ИИ сразу начал по имени (как на скрине: "Анна, нам очень жаль..."), это вежливо и разрешено!
-        if user_name and answer_lower.startswith(user_name.lower()):
-            pass
-        else:
-            errors.append("Ответ должен начинаться с вежливого приветствия или имени покупателя.")
-    
-    if user_name and user_name.lower() not in answer_lower.split('\n')[0]:
-        errors.append(f"В приветствии обязательно должно быть указано имя покупателя ('{user_name}').")
+    if user_name and user_name.casefold() not in ("покупатель", "гость", "аноним"):
+        greeting = rf"^{re.escape(user_name)}\s*,\s*добрый день[.!]"
+        if not re.match(greeting, clean_answer, re.IGNORECASE):
+            errors.append(f"Ответ должен начинаться с «{user_name}, добрый день.»")
+    elif not re.match(r"^добрый день[.!]", clean_answer, re.IGNORECASE):
+        errors.append("Ответ без имени покупателя должен начинаться с «Добрый день!»")
 
     # ========================================================
     # 3. ЗАПРЕЩЕННОЕ СЛОВО

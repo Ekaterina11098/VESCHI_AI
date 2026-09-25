@@ -40,13 +40,19 @@ def generate_draft(feedback):
         f"Недостатки: {feedback.get('cons') or 'нет'}"
     )
     client = OpenAI(api_key=api_key)
+    customer_name = str(feedback.get("userName") or "").strip()
+    if customer_name and customer_name.casefold() not in ("покупатель", "гость", "аноним"):
+        opening = f"{customer_name}, добрый день."
+    else:
+        opening = "Добрый день!"
 
     def create(style):
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content + "\n\n" + style},
+                {"role": "user", "content": user_content + "\n\nНачни ответ СТРОГО с «" + opening + "». "
+                 "Это обязательное приветствие, даже если имя уже есть в отзыве. " + style},
             ],
             temperature=0.9,
         )
@@ -55,7 +61,7 @@ def generate_draft(feedback):
 
     try:
         first = ""
-        for _ in range(2):
+        for _ in range(3):
             first = create("Вариант 1: короткий, сдержанный ответ. Сразу отреагируй на главную мысль отзыва. Выдай только готовый ответ.")
             if validate_answer(first, feedback)["approved"]:
                 break
