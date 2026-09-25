@@ -1,57 +1,77 @@
 import os
-import json
-from openai import OpenAI
+from difflib import SequenceMatcher
+
 from dotenv import load_dotenv
+from openai import OpenAI
+
+from validator import validate_answer
 
 load_dotenv()
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key) if api_key else None
-
-# Задаем универсальный облачный путь к файлу промпта, лежащему в той же папке
 PROMPT_PATH = os.path.join(os.path.dirname(__file__), "system_prompt.md")
 
+
 def load_system_prompt():
-    """Читает текст системного промпта из файла"""
-    if not os.path.exists(PROMPT_PATH):
-        raise FileNotFoundError(f"Не найден файл промта: {PROMPT_PATH}")
-    with open(PROMPT_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+    with open(PROMPT_PATH, encoding="utf-8") as prompt_file:
+        return prompt_file.read()
+
+
+def _main_text(answer):
+    return answer.split("С уважением")[0].strip().casefold()
+
+
+def _sufficiently_different(first, second):
+    a, b = _main_text(first), _main_text(second)
+    return bool(a and b) and SequenceMatcher(None, a, b).ratio() < 0.75
+
 
 def generate_draft(feedback):
-    """Генерирует два варианта ответа на отзыв через OpenAI"""
-    if not client:
-        return {
-            "variant1": "Ошибка: Не настроен OPENAI_API_KEY в Secrets.",
-            "variant2": "Ошибка: Не настроен OPENAI_API_KEY в Secrets."
-        }
-        
-    try:
-        system_prompt = load_system_prompt()
-    except Exception as e:
-        return {"variant1": f"Ошибка промпта: {e}", "variant2": f"Ошибка промпта: {e}"}
+    """Create two independent, validated answers with different wording."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Не настроен OPENAI_API_KEY в Secrets")
+    system_prompt = load_system_prompt()
+    details = feedback.get("productDetails") or {}
+    user_content = (
+        f"Покупатель: {feedback.get('userName') or 'имя не указано'}\n"
+        f"Оценка: {feedback.get('productValuation')}\n"
+        f"Товар: {details.get('productName') or feedback.get('productName') or 'не указан'}\n"
+        f"Отзыв: {feedback.get('text') or 'нет текста'}\n"
+        f"Достоинства: {feedback.get('pros') or 'нет'}\n"
+        f"Недостатки: {feedback.get('cons') or 'нет'}"
+    )
+    client = OpenAI(api_key=api_key)
 
-    user_content = f"Покупатель: {feedback.get('userName', 'Покупатель')}\nОценка: {feedback.get('productValuation', 5)} звезд\nОтзыв: {feedback.get('text', '')}"
-    
-    try:
+    def create(style):
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
+                {"role": "user", "content": user_content + "\n\n" + style},
             ],
-            temperature=0.7
+            temperature=0.9,
         )
-        text = response.choices[0].message.content.strip()
-        
-        # Разделяем два сгенерированных варианта по ключевому слову или строке
-        if "Вариант 2" in text:
-            parts = text.split("Вариант 2")
-            v1 = parts[0].replace("Вариант 1", "").strip(":\n ")
-            v2 = parts[1].strip(":\n ")
+        answer = (response.choices[0].message.content or "").strip()
+        return answer
+
+    try:
+        first = ""
+        for _ in range(2):
+            first = create("Вариант 1: короткий, сдержанный ответ. Сразу отреагируй на главную мысль отзыва. Выдай только готовый ответ.")
+            if validate_answer(first, feedback)["approved"]:
+                break
         else:
-            v1 = text
-            v2 = text + " (Повтор: ИИ сгенерировал один вариант)"
-            
-        return {"variant1": v1, "variant2": v2}
-    except Exception as e:
-        return {"variant1": f"Ошибка ИИ: {e}", "variant2": f"Ошибка ИИ: {e}"}
+            raise RuntimeError("ИИ не смог подготовить допустимый первый ответ. Попробуйте ещё раз")
+
+        for _ in range(3):
+            second = create(
+                "Вариант 2: более тёплый ответ, иной порядок мыслей и заметно другие формулировки. "
+                "Не копируй текст варианта 1, который приведён ниже; сохрани те же факты и правила бренда. "
+                "Выдай только готовый ответ.\nВариант 1:\n" + first
+            )
+            if validate_answer(second, feedback)["approved"] and _sufficiently_different(first, second):
+                return {"variant1": first, "variant2": second}
+        raise RuntimeError("ИИ не смог создать достаточно отличающийся второй ответ. Нажмите генерацию ещё раз")
+    except RuntimeError:
+        raise
+    except Exception as error:
+        raise RuntimeError("Не удалось создать черновики. Проверьте настройки OpenAI и попробуйте ещё раз") from error

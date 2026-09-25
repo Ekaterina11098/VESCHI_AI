@@ -20,6 +20,22 @@ def save_to_benchmarks(feedback_data, original_draft, final_answer):
         "final": final_answer
     })
 
+def publish_reply(feedback, original_draft, answer):
+    fb_id = feedback.get("id")
+    if st.session_state.get(f"published_{fb_id}"):
+        st.info("Ответ на этот отзыв уже отправлен в этой сессии.")
+        return
+    try:
+        with st.spinner("Отправляем ответ на Wildberries…"):
+            post_review_reply(fb_id, answer)
+    except (RuntimeError, ValueError) as error:
+        st.error(f"Ответ не отправлен: {error}")
+        return
+    st.session_state[f"published_{fb_id}"] = True
+    save_to_benchmarks(feedback, original_draft, answer)
+    st.balloons()
+    st.success("🎉 Ответ успешно отправлен на Wildberries!")
+
 st.title("👜 Панель контент-менеджера бренда VESCHI")
 st.caption("Автоматизация ответов на отзывы Wildberries с помощью искусственного интеллекта и жесткой валидации")
 
@@ -52,13 +68,15 @@ else:
             btn_key = f"gen_{fb_id}_{idx}"
             if st.button("✨ Создать черновики AI (2 варианты)", key=btn_key):
                 with st.spinner("🤖 Нейросеть VESCHI AI анализирует отзыв..."):
-                    res = generate_draft(fb)
-                    if isinstance(res, dict):
+                    try:
+                        res = generate_draft(fb)
+                    except RuntimeError as error:
+                        st.error(str(error))
+                    else:
                         st.session_state[f"v1_{fb_id}"] = res.get("variant1", "")
                         st.session_state[f"v2_{fb_id}"] = res.get("variant2", "")
-                    else:
-                        st.session_state[f"v1_{fb_id}"] = str(res)
-                        st.session_state[f"v2_{fb_id}"] = str(res)
+                        st.session_state[f"txt1_{fb_id}_{idx}"] = res["variant1"]
+                        st.session_state[f"txt2_{fb_id}_{idx}"] = res["variant2"]
             
             v1_saved = st.session_state.get(f"v1_{fb_id}", "")
             v2_saved = st.session_state.get(f"v2_{fb_id}", "")
@@ -76,10 +94,7 @@ else:
                         st.success("✅ Черновик одобрен Валидатором!")
                         pub_key_1 = f"pub1_{fb_id}_{idx}"
                         if st.button("🚀 Опубликовать Вариант 1 на WB", key=pub_key_1, type="primary"):
-                            if post_review_reply(fb_id, edited_v1):
-                                st.balloons()
-                                st.success("🎉 Ответ успешно отправлен на Wildberries!")
-                                save_to_benchmarks(fb, v1_saved, edited_v1)
+                            publish_reply(fb, v1_saved, edited_v1)
                     else:
                         st.error("❌ Черновик заблокирован Validator!")
                         for err in val_res1["errors"]: st.markdown(f"🔴 *{err}*")
@@ -92,10 +107,7 @@ else:
                         st.success("✅ Черновик одобрен Валидатором!")
                         pub_key_2 = f"pub2_{fb_id}_{idx}"
                         if st.button("🚀 Опубликовать Вариант 2 на WB", key=pub_key_2, type="primary"):
-                            if post_review_reply(fb_id, edited_v2):
-                                st.balloons()
-                                st.success("🎉 Ответ успешно отправлен на Wildberries!")
-                                save_to_benchmarks(fb, v2_saved, edited_v2)
+                            publish_reply(fb, v2_saved, edited_v2)
                     else:
                         st.error("❌ Черновик заблокирован Validator!")
                         for err in val_res2["errors"]: st.markdown(f"🔴 *{err}*")

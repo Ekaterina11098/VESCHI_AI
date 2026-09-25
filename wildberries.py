@@ -128,41 +128,25 @@ def get_unanswered_feedbacks(take=10, skip=0):
 # ============================================================
 
 def post_review_reply(feedback_id, reply_text):
-    """
-    Отправляет готовый ответ на отзыв в личный кабинет Wildberries (PATCH запрос).
-    Возвращает True в случае успеха и False при ошибке.
-    """
-    url = f"{BASE_URL}/api/v1/feedbacks"
-    
-    headers = {
-        "Authorization": feedback_token()
-    }
-    
-    payload = {
-        "id": feedback_id,
-        "wasViewed": True,
-        "answer": {
-            "text": reply_text
-        }
-    }
-    
+    """Publish one reply. Raise a visible error; never retry a POST blindly."""
+    if not feedback_id or not str(reply_text or "").strip():
+        raise ValueError("Нужны ID отзыва и непустой текст ответа")
+    if str(feedback_id).startswith("demo_"):
+        return True
     try:
-        # Безопасный перехватчик для демо-отзывов
-        if str(feedback_id).startswith("demo_"):
-            print(f"📦 [Симуляция WB API]: Ответ на демо-отзыв {feedback_id} успешно отправлен.")
-            return True
-            
-        # Реальная отправка на Wildberries
-        response = requests.patch(url, headers=headers, json=payload, timeout=10)
-        
-        if response.status_code == 200:
-            return True
-        else:
-            print(f"Ошибка публикации на WB (HTTP {response.status_code}): {response.text}")
-            return False
-    except Exception as error:
-        print(f"Ошибка соединения при публикации: {error}")
-        return False
+        response = requests.post(
+            f"{BASE_URL}/api/v1/feedbacks/answer",
+            headers={"Authorization": feedback_token()},
+            json={"id": feedback_id, "text": reply_text},
+            timeout=30,
+        )
+    except requests.RequestException as error:
+        raise RuntimeError("Не удалось получить подтверждение WB. Проверьте отзыв в кабинете перед повторной отправкой") from error
+    if not 200 <= response.status_code < 300:
+        detail = response.text.strip()[:400]
+        raise RuntimeError(f"WB не принял ответ (HTTP {response.status_code})" +
+                           (f": {detail}" if detail else ""))
+    return True
 
 
 # ============================================================
@@ -195,43 +179,3 @@ if __name__ == "__main__":
             print_feedback(feedback)
 
 
-# ============================================================
-# НОВАЯ ФУНКЦИЯ: ПУБЛИКАЦИЯ ОТВЕТА НА WB
-# ============================================================
-
-def post_review_reply(feedback_id, reply_text):
-    """
-    Отправляет готовый ответ на отзыв в личный кабинет Wildberries (PATCH запрос).
-    Возвращает True в случае успеха и False при ошибке.
-    """
-    url = f"{BASE_URL}/api/v1/feedbacks"
-    
-    headers = {
-        "Authorization": feedback_token()
-    }
-    
-    payload = {
-        "id": feedback_id,
-        "wasViewed": True,
-        "answer": {
-            "text": reply_text
-        }
-    }
-    
-    try:
-        # Безопасный перехватчик для демо-отзывов
-        if str(feedback_id).startswith("demo_"):
-            print(f"📦 [Симуляция WB API]: Ответ на демо-отзыв {feedback_id} успешно отправлен.")
-            return True
-            
-        # Реальная отправка на Wildberries
-        response = requests.patch(url, headers=headers, json=payload, timeout=10)
-        
-        if response.status_code == 200:
-            return True
-        else:
-            print(f"Ошибка публикации на WB (HTTP {response.status_code}): {response.text}")
-            return False
-    except Exception as error:
-        print(f"Ошибка соединения при публикации: {error}")
-        return False
